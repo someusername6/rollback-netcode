@@ -356,7 +356,8 @@ describe("RollbackEngine", () => {
 
       // Verify state matches
       assert.strictEqual(game2.x, 50);
-      assert.strictEqual(engine2.currentTick, 6);
+      // engine1.currentTick is 5 (after 5 ticks), engine2 syncs to same tick
+      assert.strictEqual(engine2.currentTick, 5);
     });
   });
 

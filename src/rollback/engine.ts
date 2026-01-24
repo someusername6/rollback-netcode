@@ -148,6 +148,19 @@ export class RollbackEngine {
   }
 
   /**
+   * Save the initial snapshot at tick -1.
+   * This allows rollback of tick 0 if there's a misprediction.
+   * Call this before the first tick() if the engine wasn't initialized via setState().
+   */
+  saveInitialSnapshot(): void {
+    if (!this.snapshotBuffer.has(asTick(-1))) {
+      const state = this.game.serialize();
+      const hash = this.game.hash();
+      this.snapshotBuffer.save(asTick(-1), state, hash);
+    }
+  }
+
+  /**
    * Advance the simulation by one tick.
    *
    * This is the core rollback algorithm:
@@ -160,6 +173,10 @@ export class RollbackEngine {
    * @returns Result containing tick number and rollback info
    */
   tick(): TickResult {
+    // Ensure we have an initial snapshot for rollback on first tick
+    if (this._currentTick === 0) {
+      this.saveInitialSnapshot();
+    }
     // Check for max speculation limit
     const minConfirmed = this.inputBuffer.getMinConfirmedTick(this._currentTick);
     if (minConfirmed !== undefined) {
@@ -398,13 +415,14 @@ export class RollbackEngine {
       }
     }
 
-    // Save initial snapshot
+    // Save initial snapshot at tick - 1 (state before any simulation)
+    // This is needed so we can rollback tick 0 if there's a misprediction
     const hash = this.game.hash();
-    this.snapshotBuffer.save(tick, state, hash);
+    this.snapshotBuffer.save(asTick(tick - 1), state, hash);
 
-    // Set tick counters
-    this._currentTick = asTick(tick + 1);
-    this._confirmedTick = tick;
+    // Set tick counters - currentTick is the next tick to simulate
+    this._currentTick = tick;
+    this._confirmedTick = asTick(tick - 1);
   }
 
   /**

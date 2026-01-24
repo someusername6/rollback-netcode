@@ -1,0 +1,506 @@
+import { describe, it, beforeEach } from "node:test";
+import assert from "node:assert";
+import { Session, createSession } from "./session.js";
+import { LocalTransport, createLocalTransportGroup } from "../transport/local.js";
+import { type Game, type PlayerId, asPlayerId, asTick } from "../types.js";
+
+/**
+ * Simple test game that tracks position.
+ */
+class TestGame implements Game {
+  x = 0;
+  y = 0;
+
+  serialize(): Uint8Array {
+    const buffer = new ArrayBuffer(8);
+    const view = new DataView(buffer);
+    view.setInt32(0, this.x);
+    view.setInt32(4, this.y);
+    return new Uint8Array(buffer);
+  }
+
+  deserialize(data: Uint8Array): void {
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    this.x = view.getInt32(0);
+    this.y = view.getInt32(4);
+  }
+
+  step(inputs: Map<PlayerId, Uint8Array>): void {
+    for (const [, input] of inputs) {
+      if (input.length >= 2) {
+        this.x += (input[0] ?? 0) - 128;
+        this.y += (input[1] ?? 0) - 128;
+      }
+    }
+  }
+
+  hash(): number {
+    return this.x * 10000 + this.y;
+  }
+}
+
+describe("Session", () => {
+  describe("room creation", () => {
+    it("should create a room and become host", async () => {
+      const transport = new LocalTransport("host");
+      const game = new TestGame();
+      const session = createSession({ game, transport });
+
+      const roomId = await session.createRoom();
+
+      assert.ok(roomId);
+      assert.strictEqual(session.isHost, true);
+      assert.strictEqual(session.state, "lobby");
+      assert.strictEqual(session.roomId, roomId);
+    });
+
+    it("should throw when creating room while already in one", async () => {
+      const transport = new LocalTransport("host");
+      const game = new TestGame();
+      const session = createSession({ game, transport });
+
+      await session.createRoom();
+
+      await assert.rejects(() => session.createRoom(), /Already in a room/);
+    });
+  });
+
+  describe("joining rooms", () => {
+    it("should join an existing room", async () => {
+      const transports = createLocalTransportGroup(["host", "client"]);
+      const hostTransport = transports.get("host")!;
+      const clientTransport = transports.get("client")!;
+
+      const hostGame = new TestGame();
+      const clientGame = new TestGame();
+
+      const hostSession = createSession({ game: hostGame, transport: hostTransport });
+      const clientSession = createSession({ game: clientGame, transport: clientTransport });
+
+      const roomId = await hostSession.createRoom();
+      await clientSession.joinRoom(roomId, "host");
+
+      // Flush messages: client sends JoinRequest, host receives and sends JoinAccept
+      clientTransport.flush(); // Deliver JoinRequest to host
+      hostTransport.flush(); // Deliver JoinAccept to client
+
+      assert.strictEqual(clientSession.state, "lobby");
+      assert.strictEqual(clientSession.isHost, false);
+    });
+  });
+
+  describe("starting game", () => {
+    it("should start game from lobby", async () => {
+      const transports = createLocalTransportGroup(["host", "client"]);
+      const hostTransport = transports.get("host")!;
+      const clientTransport = transports.get("client")!;
+
+      const hostGame = new TestGame();
+      const clientGame = new TestGame();
+
+      const hostSession = createSession({ game: hostGame, transport: hostTransport });
+      const clientSession = createSession({ game: clientGame, transport: clientTransport });
+
+      await hostSession.createRoom();
+      await clientSession.joinRoom(hostSession.roomId!, "host");
+      clientTransport.flush();
+      hostTransport.flush();
+
+      // Start game
+      hostSession.start();
+      hostTransport.flush(); // Host sends StateSync
+      clientTransport.flush(); // Client receives it
+
+      assert.strictEqual(hostSession.state, "playing");
+      assert.strictEqual(clientSession.state, "playing");
+    });
+
+    it("should throw when non-host tries to start", async () => {
+      const transports = createLocalTransportGroup(["host", "client"]);
+      const hostTransport = transports.get("host")!;
+      const clientTransport = transports.get("client")!;
+
+      const hostGame = new TestGame();
+      const clientGame = new TestGame();
+
+      const hostSession = createSession({ game: hostGame, transport: hostTransport });
+      const clientSession = createSession({ game: clientGame, transport: clientTransport });
+
+      await hostSession.createRoom();
+      await clientSession.joinRoom(hostSession.roomId!, "host");
+      clientTransport.flush();
+      hostTransport.flush();
+
+      assert.throws(() => clientSession.start(), /Only the host/);
+    });
+  });
+
+  describe("ticking", () => {
+    it("should advance simulation with tick()", async () => {
+      const transport = new LocalTransport("host");
+      const game = new TestGame();
+      const session = createSession({ game, transport });
+
+      await session.createRoom();
+      session.start();
+
+      const result = session.tick(new Uint8Array([138, 128])); // +10 x
+
+      assert.strictEqual(result.tick, 0);
+      assert.strictEqual(session.currentTick, 1);
+      assert.strictEqual(game.x, 10);
+    });
+
+    it("should sync between two players", async () => {
+      const transports = createLocalTransportGroup(["host", "client"]);
+      const hostTransport = transports.get("host")!;
+      const clientTransport = transports.get("client")!;
+
+      const hostGame = new TestGame();
+      const clientGame = new TestGame();
+
+      const hostSession = createSession({ game: hostGame, transport: hostTransport });
+      const clientSession = createSession({ game: clientGame, transport: clientTransport });
+
+      await hostSession.createRoom();
+      await clientSession.joinRoom(hostSession.roomId!, "host");
+      clientTransport.flush(); // JoinRequest to host
+      hostTransport.flush(); // JoinAccept to client
+
+      hostSession.start();
+      hostTransport.flush(); // StateSync to client
+
+      // Verify both sessions are at the same starting tick
+      assert.strictEqual(hostSession.currentTick, clientSession.currentTick);
+
+      // Both players tick with same input
+      for (let i = 0; i < 10; i++) {
+        hostSession.tick(new Uint8Array([138, 128])); // +10 x
+        clientSession.tick(new Uint8Array([128, 138])); // +10 y
+
+        // Exchange messages (both directions)
+        hostTransport.flush();
+        clientTransport.flush();
+      }
+
+      // Run extra ticks with no movement to allow final rollbacks
+      for (let i = 0; i < 5; i++) {
+        hostSession.tick(new Uint8Array([128, 128]));
+        clientSession.tick(new Uint8Array([128, 128]));
+        hostTransport.flush();
+        clientTransport.flush();
+      }
+
+      // Games should be in sync
+      // 10 ticks with: host +10x, client +10y = x+100, y+100
+      assert.strictEqual(hostGame.x, 100);
+      assert.strictEqual(hostGame.y, 100);
+      assert.strictEqual(clientGame.x, 100);
+      assert.strictEqual(clientGame.y, 100);
+    });
+  });
+
+  describe("pause and resume", () => {
+    it("should pause game", async () => {
+      const transport = new LocalTransport("host");
+      const game = new TestGame();
+      const session = createSession({ game, transport });
+
+      await session.createRoom();
+      session.start();
+      session.pause();
+
+      assert.strictEqual(session.state, "paused");
+    });
+
+    it("should resume game", async () => {
+      const transport = new LocalTransport("host");
+      const game = new TestGame();
+      const session = createSession({ game, transport });
+
+      await session.createRoom();
+      session.start();
+      session.pause();
+      session.resume();
+
+      assert.strictEqual(session.state, "playing");
+    });
+
+    it("should not advance during pause", async () => {
+      const transport = new LocalTransport("host");
+      const game = new TestGame();
+      const session = createSession({ game, transport });
+
+      await session.createRoom();
+      session.start();
+      session.tick(new Uint8Array([138, 128]));
+      assert.strictEqual(session.currentTick, 1);
+
+      session.pause();
+      session.tick(new Uint8Array([138, 128])); // Should be ignored
+
+      assert.strictEqual(session.currentTick, 1); // No change
+    });
+  });
+
+  describe("leaving room", () => {
+    it("should leave room and reset state", async () => {
+      const transport = new LocalTransport("host");
+      const game = new TestGame();
+      const session = createSession({ game, transport });
+
+      await session.createRoom();
+      session.start();
+      session.tick(new Uint8Array([138, 128]));
+
+      session.leaveRoom();
+
+      assert.strictEqual(session.state, "disconnected");
+      assert.strictEqual(session.roomId, null);
+      assert.strictEqual(session.isHost, false);
+      assert.strictEqual(session.currentTick, 0);
+    });
+  });
+
+  describe("events", () => {
+    it("should emit stateChange events", async () => {
+      const transport = new LocalTransport("host");
+      const game = new TestGame();
+      const session = createSession({ game, transport });
+
+      const stateChanges: string[] = [];
+      session.on("stateChange", (newState) => {
+        stateChanges.push(newState);
+      });
+
+      await session.createRoom();
+      session.start();
+      session.pause();
+      session.resume();
+      session.leaveRoom();
+
+      assert.deepStrictEqual(stateChanges, [
+        "lobby",
+        "playing",
+        "paused",
+        "playing",
+        "disconnected",
+      ]);
+    });
+
+    it("should emit playerJoined events", async () => {
+      const transports = createLocalTransportGroup(["host", "client"]);
+      const hostTransport = transports.get("host")!;
+      const clientTransport = transports.get("client")!;
+
+      const hostGame = new TestGame();
+      const clientGame = new TestGame();
+
+      const hostSession = createSession({ game: hostGame, transport: hostTransport });
+      const clientSession = createSession({ game: clientGame, transport: clientTransport });
+
+      const joinedPlayers: PlayerId[] = [];
+      hostSession.on("playerJoined", (player) => {
+        joinedPlayers.push(player.id);
+      });
+
+      await hostSession.createRoom();
+      await clientSession.joinRoom(hostSession.roomId!, "host");
+      clientTransport.flush();
+      hostTransport.flush();
+
+      assert.strictEqual(joinedPlayers.length, 1);
+      assert.strictEqual(joinedPlayers[0], "client");
+    });
+
+    it("should emit gameStart events", async () => {
+      const transport = new LocalTransport("host");
+      const game = new TestGame();
+      const session = createSession({ game, transport });
+
+      let started = false;
+      session.on("gameStart", () => {
+        started = true;
+      });
+
+      await session.createRoom();
+      session.start();
+
+      assert.strictEqual(started, true);
+    });
+  });
+
+  describe("multi-player sync", () => {
+    it("should handle 3-player game", async () => {
+      const transports = createLocalTransportGroup(["p1", "p2", "p3"]);
+      const games = new Map<string, TestGame>();
+      const sessions = new Map<string, Session>();
+
+      // Helper to flush all transports multiple times for full propagation
+      const flushAll = () => {
+        for (let i = 0; i < 3; i++) {
+          for (const t of transports.values()) t.flush();
+        }
+      };
+
+      for (const [peerId, transport] of transports) {
+        const game = new TestGame();
+        games.set(peerId, game);
+        sessions.set(peerId, createSession({ game, transport }));
+      }
+
+      // P1 creates room
+      const p1Session = sessions.get("p1")!;
+      await p1Session.createRoom();
+
+      // P2 and P3 join
+      for (const peerId of ["p2", "p3"]) {
+        const session = sessions.get(peerId)!;
+        await session.joinRoom(p1Session.roomId!, "p1");
+        flushAll();
+      }
+
+      // Start game
+      p1Session.start();
+      flushAll();
+
+      // Verify all sessions are playing
+      for (const session of sessions.values()) {
+        assert.strictEqual(session.state, "playing");
+      }
+
+      // Run 5 ticks
+      for (let i = 0; i < 5; i++) {
+        sessions.get("p1")!.tick(new Uint8Array([138, 128])); // +10 x
+        sessions.get("p2")!.tick(new Uint8Array([128, 138])); // +10 y
+        sessions.get("p3")!.tick(new Uint8Array([128, 128])); // no movement
+
+        flushAll();
+      }
+
+      // Run a few more ticks to allow final rollbacks
+      for (let i = 0; i < 3; i++) {
+        for (const session of sessions.values()) {
+          session.tick(new Uint8Array([128, 128]));
+        }
+        flushAll();
+      }
+
+      // All games should have same state
+      const expectedX = 50;
+      const expectedY = 50;
+
+      for (const [, game] of games) {
+        assert.strictEqual(game.x, expectedX);
+        assert.strictEqual(game.y, expectedY);
+      }
+    });
+  });
+
+  describe("rollback in multiplayer", () => {
+    it("should rollback when inputs arrive late", async () => {
+      const transports = createLocalTransportGroup(["host", "client"], {
+        latency: 50, // 50ms latency
+      });
+      const hostTransport = transports.get("host")!;
+      const clientTransport = transports.get("client")!;
+
+      const hostGame = new TestGame();
+      const clientGame = new TestGame();
+
+      const hostSession = createSession({ game: hostGame, transport: hostTransport });
+      const clientSession = createSession({ game: clientGame, transport: clientTransport });
+
+      await hostSession.createRoom();
+      await clientSession.joinRoom(hostSession.roomId!, "host");
+
+      // Flush initial messages (need to alternate to handle request/response)
+      clientTransport.tick(100); // JoinRequest to host
+      hostTransport.tick(100); // JoinAccept to client
+
+      hostSession.start();
+      hostTransport.tick(100); // StateSync to client
+
+      // Run ticks with latency
+      let rollbackOccurred = false;
+      for (let i = 0; i < 20; i++) {
+        const hostResult = hostSession.tick(new Uint8Array([138, 128]));
+        const clientResult = clientSession.tick(new Uint8Array([118, 128]));
+
+        if (hostResult.rolledBack || clientResult.rolledBack) {
+          rollbackOccurred = true;
+        }
+
+        // Advance time to deliver messages
+        hostTransport.tick(20);
+        clientTransport.tick(20);
+      }
+
+      // Due to latency, rollbacks should occur
+      assert.strictEqual(rollbackOccurred, true);
+
+      // Final state should still be in sync (eventually)
+      // Deliver remaining messages
+      hostTransport.tick(200);
+      clientTransport.tick(200);
+
+      assert.strictEqual(hostGame.x, clientGame.x);
+      assert.strictEqual(hostGame.y, clientGame.y);
+    });
+  });
+
+  describe("createSession factory", () => {
+    it("should create session with custom config", async () => {
+      const transport = new LocalTransport("host");
+      const game = new TestGame();
+      const session = createSession({
+        game,
+        transport,
+        config: {
+          tickRate: 30,
+          maxPlayers: 8,
+        },
+      });
+
+      await session.createRoom();
+      assert.strictEqual(session.state, "lobby");
+    });
+  });
+
+  describe("request sync", () => {
+    it("should allow requesting sync from host", async () => {
+      const transports = createLocalTransportGroup(["host", "client"]);
+      const hostTransport = transports.get("host")!;
+      const clientTransport = transports.get("client")!;
+
+      const hostGame = new TestGame();
+      const clientGame = new TestGame();
+
+      const hostSession = createSession({ game: hostGame, transport: hostTransport });
+      const clientSession = createSession({ game: clientGame, transport: clientTransport });
+
+      await hostSession.createRoom();
+      await clientSession.joinRoom(hostSession.roomId!, "host");
+      clientTransport.flush(); // JoinRequest
+      hostTransport.flush(); // JoinAccept
+
+      hostSession.start();
+      hostTransport.flush(); // StateSync
+
+      // Host advances
+      for (let i = 0; i < 5; i++) {
+        hostSession.tick(new Uint8Array([138, 128]));
+        hostTransport.flush();
+      }
+
+      // Client requests sync
+      clientSession.requestSync();
+      clientTransport.flush();
+      clientTransport.flush();
+      hostTransport.flush();
+
+      // Client should now be synced
+      assert.strictEqual(clientGame.x, hostGame.x);
+    });
+  });
+});
