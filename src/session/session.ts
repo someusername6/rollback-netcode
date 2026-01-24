@@ -25,8 +25,7 @@ import {
 	validateSessionConfig,
 } from "../types.js";
 
-/** Number of ticks of input to include in each message for redundancy */
-const DEFAULT_INPUT_REDUNDANCY = 3;
+import { type DebugLogger, createDebugLogger } from "../debug.js";
 import { decodeMessage, encodeMessage } from "../protocol/encoding.js";
 import {
 	type Message,
@@ -52,7 +51,18 @@ import {
 	type RollbackEngineConfig,
 } from "../rollback/engine.js";
 import { type TopologyStrategy, createTopologyStrategy } from "./topology.js";
-import { type DebugLogger, createDebugLogger } from "../debug.js";
+
+/** Number of ticks of input to include in each message for redundancy */
+const DEFAULT_INPUT_REDUNDANCY = 3;
+
+/** Maximum join requests per peer within the rate limit window */
+const JOIN_REQUEST_LIMIT = 3;
+
+/** Time window for rate limiting join requests (in milliseconds) */
+const JOIN_REQUEST_WINDOW_MS = 10000;
+
+/** Interval for cleaning up stale rate limit entries (in milliseconds) */
+const RATE_LIMIT_CLEANUP_INTERVAL_MS = 60000;
 
 /**
  * Options for creating a session.
@@ -75,9 +85,18 @@ export interface CreateSessionOptions {
 }
 
 /**
- * Generate a random room ID.
+ * Generate a cryptographically random room ID.
+ * Uses crypto.randomUUID() for unpredictable room IDs.
  */
 function generateRoomId(): string {
+	// Use crypto.randomUUID() for secure random IDs
+	// Falls back to a less secure method if crypto is unavailable
+	if (typeof crypto !== "undefined" && crypto.randomUUID) {
+		// Take first 8 characters of UUID for shorter room codes
+		return crypto.randomUUID().slice(0, 8);
+	}
+
+	// Fallback for environments without crypto.randomUUID
 	const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
 	let id = "";
 	for (let i = 0; i < 8; i++) {
@@ -109,6 +128,12 @@ export class Session {
 	private readonly _players: Map<PlayerId, PlayerInfo> = new Map();
 	private lastHashBroadcastTick: Tick = asTick(-1);
 	private inputRedundancy = DEFAULT_INPUT_REDUNDANCY;
+
+	/** Rate limiting: tracks join request timestamps per peer */
+	private readonly joinRequestTimes: Map<string, number[]> = new Map();
+
+	/** Timer for periodic rate limit cleanup */
+	private rateLimitCleanupTimer: ReturnType<typeof setInterval> | null = null;
 
 	/**
 	 * Create a new session.
@@ -155,6 +180,24 @@ export class Session {
 		this.transport.onMessage = this.handleMessage.bind(this);
 		this.transport.onConnect = this.handlePeerConnect.bind(this);
 		this.transport.onDisconnect = this.handlePeerDisconnect.bind(this);
+
+		// Setup keepalive callback if transport supports it
+		const transportWithKeepalive = this.transport as {
+			onKeepalivePing?: ((peerId: string) => void) | null;
+		};
+		if ("onKeepalivePing" in transportWithKeepalive) {
+			transportWithKeepalive.onKeepalivePing = (peerId: string) => {
+				this.sendPing(peerId);
+			};
+		}
+
+		// Start periodic rate limit cleanup (unref to not block process exit)
+		this.rateLimitCleanupTimer = setInterval(() => {
+			this.cleanupRateLimitEntries();
+		}, RATE_LIMIT_CLEANUP_INTERVAL_MS);
+		if (this.rateLimitCleanupTimer.unref) {
+			this.rateLimitCleanupTimer.unref();
+		}
 	}
 
 	/**
@@ -230,12 +273,33 @@ export class Session {
 	}
 
 	/**
+	 * Destroy the session and clean up resources.
+	 * Call this when the session is no longer needed.
+	 */
+	destroy(): void {
+		this.leaveRoom();
+
+		// Stop rate limit cleanup timer
+		if (this.rateLimitCleanupTimer) {
+			clearInterval(this.rateLimitCleanupTimer);
+			this.rateLimitCleanupTimer = null;
+		}
+
+		// Clear rate limit entries
+		this.joinRequestTimes.clear();
+
+		// Remove transport callbacks
+		this.transport.onMessage = null;
+		this.transport.onConnect = null;
+		this.transport.onDisconnect = null;
+	}
+
+	/**
 	 * Create a new room and become the host.
 	 *
-	 * @param options - Room options
 	 * @returns The room ID
 	 */
-	async createRoom(options?: { maxPlayers?: number }): Promise<string> {
+	async createRoom(): Promise<string> {
 		if (this._state !== "disconnected") {
 			throw new Error("Already in a room or connecting");
 		}
@@ -525,6 +589,12 @@ export class Session {
 	 * Handle incoming message from transport.
 	 */
 	private handleMessage(peerId: string, data: Uint8Array): void {
+		// Record peer response for keepalive tracking
+		const transportWithMetrics = this.transport as {
+			recordPeerResponse?: (peerId: string) => void;
+		};
+		transportWithMetrics.recordPeerResponse?.(peerId);
+
 		let message: Message;
 		try {
 			message = decodeMessage(data);
@@ -715,15 +785,67 @@ export class Session {
 	}
 
 	/**
+	 * Check if a peer is rate limited for join requests.
+	 */
+	private isJoinRateLimited(peerId: string): boolean {
+		const now = Date.now();
+		const times = this.joinRequestTimes.get(peerId) ?? [];
+
+		// Remove timestamps outside the window
+		const recentTimes = times.filter((t) => now - t < JOIN_REQUEST_WINDOW_MS);
+		this.joinRequestTimes.set(peerId, recentTimes);
+
+		return recentTimes.length >= JOIN_REQUEST_LIMIT;
+	}
+
+	/**
+	 * Record a join request for rate limiting.
+	 */
+	private recordJoinRequest(peerId: string): void {
+		const times = this.joinRequestTimes.get(peerId) ?? [];
+		times.push(Date.now());
+		this.joinRequestTimes.set(peerId, times);
+	}
+
+	/**
+	 * Clean up stale rate limit entries to prevent memory growth.
+	 */
+	private cleanupRateLimitEntries(): void {
+		const now = Date.now();
+		for (const [peerId, times] of this.joinRequestTimes) {
+			const recentTimes = times.filter((t) => now - t < JOIN_REQUEST_WINDOW_MS);
+			if (recentTimes.length === 0) {
+				this.joinRequestTimes.delete(peerId);
+			} else {
+				this.joinRequestTimes.set(peerId, recentTimes);
+			}
+		}
+	}
+
+	/**
 	 * Handle join request (host only).
 	 */
 	private handleJoinRequest(
 		peerId: string,
 		message: Message & { type: MessageType.JoinRequest },
 	): void {
-		if (!this._isHost) return;
+		if (!this._isHost || !this._roomId) return;
 
 		const playerId = message.playerId;
+
+		// Check rate limiting
+		if (this.isJoinRateLimited(peerId)) {
+			const rejectMsg: Message = {
+				type: MessageType.JoinReject,
+				playerId,
+				reason: "Too many join requests, please wait",
+			};
+			this.sendToPeer(peerId, rejectMsg, true);
+			return;
+		}
+
+		// Record this join request
+		this.recordJoinRequest(peerId);
 
 		// Check if room is full
 		if (this._players.size >= this.config.maxPlayers) {
@@ -740,7 +862,7 @@ export class Session {
 		const acceptMsg: Message = {
 			type: MessageType.JoinAccept,
 			playerId,
-			roomId: this._roomId!,
+			roomId: this._roomId,
 			config: {
 				tickRate: this.config.tickRate,
 				maxPlayers: this.config.maxPlayers,

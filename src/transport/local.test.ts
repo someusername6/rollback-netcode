@@ -184,7 +184,7 @@ describe("LocalTransport", () => {
 			LocalTransport.link(t1, t2);
 
 			const received: number[] = [];
-			t2.onMessage = (_, msg) => received.push(msg[0]!);
+			t2.onMessage = (_, msg) => received.push(msg[0] ?? 0);
 
 			await t1.connect("peer-2");
 
@@ -270,7 +270,7 @@ describe("LocalTransport", () => {
 				LocalTransport.link(t1, t2);
 
 				const received: number[] = [];
-				t2.onMessage = (_, msg) => received.push(msg[0]!);
+				t2.onMessage = (_, msg) => received.push(msg[0] ?? 0);
 
 				await t1.connect("peer-2");
 
@@ -328,7 +328,7 @@ describe("LocalTransport", () => {
 			for (const [peerId, transport] of transports) {
 				received.set(peerId, []);
 				transport.onMessage = (fromPeerId, msg) => {
-					received.get(peerId)?.push(msg[0]!);
+					received.get(peerId)?.push(msg[0] ?? 0);
 				};
 			}
 
@@ -342,7 +342,8 @@ describe("LocalTransport", () => {
 			}
 
 			// p1 broadcasts
-			const p1 = transports.get("p1")!;
+			const p1 = transports.get("p1");
+			assert.ok(p1, "p1 transport should exist");
 			p1.broadcast(new Uint8Array([42]), true);
 			p1.flush();
 
@@ -387,7 +388,8 @@ describe("LocalTransport", () => {
 			assert.ok(transports.has("c"));
 
 			// Should be able to connect any pair
-			const a = transports.get("a")!;
+			const a = transports.get("a");
+			assert.ok(a, "a transport should exist");
 			await a.connect("b");
 			await a.connect("c");
 
@@ -400,9 +402,12 @@ describe("LocalTransport", () => {
 			});
 
 			const received: Uint8Array[] = [];
-			transports.get("b")!.onMessage = (_, msg) => received.push(msg);
+			const b = transports.get("b");
+			assert.ok(b, "b transport should exist");
+			b.onMessage = (_, msg) => received.push(msg);
 
-			const a = transports.get("a")!;
+			const a = transports.get("a");
+			assert.ok(a, "a transport should exist");
 			await a.connect("b");
 			a.send("b", new Uint8Array([1]), true);
 

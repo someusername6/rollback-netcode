@@ -61,8 +61,8 @@ export class InputBuffer {
 	 * @param joinTick - The tick at which the player joins
 	 */
 	addPlayer(playerId: PlayerId, joinTick: Tick): void {
-		if (this.players.has(playerId)) {
-			const existing = this.players.get(playerId)!;
+		const existing = this.players.get(playerId);
+		if (existing) {
 			// If player is rejoining, update join tick and clear leave tick
 			if (existing.leaveTick !== null) {
 				existing.joinTick = joinTick;

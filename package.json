@@ -12,7 +12,8 @@
     "build": "tsc",
     "test": "node --import tsx --test src/**/*.test.ts",
     "lint": "biome check src/",
-    "format": "biome format --write src/"
+    "format": "biome format --write src/",
+    "benchmark": "node --import tsx src/benchmark.ts"
   },
   "keywords": [
     "netcode",

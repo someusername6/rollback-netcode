@@ -28,6 +28,12 @@ const RECONNECT_JITTER_FACTOR = 0.2;
 /** Number of RTT samples to keep for jitter calculation */
 const RTT_SAMPLE_COUNT = 10;
 
+/** Default keepalive interval in milliseconds */
+const DEFAULT_KEEPALIVE_INTERVAL_MS = 5000;
+
+/** Maximum time without response before considering peer dead (in ms) */
+const DEFAULT_KEEPALIVE_TIMEOUT_MS = 15000;
+
 /**
  * Configuration for the WebRTC transport.
  */
@@ -46,6 +52,12 @@ export interface WebRTCTransportConfig {
 
 	/** Delay between reconnection attempts in milliseconds */
 	reconnectDelay?: number;
+
+	/** Interval for sending keepalive pings (0 to disable, default: 5000ms) */
+	keepaliveInterval?: number;
+
+	/** Time without response before considering peer dead (default: 15000ms) */
+	keepaliveTimeout?: number;
 }
 
 /**
@@ -116,6 +128,9 @@ interface PeerMetricsData {
 
 	/** Pending ping timestamps (timestamp -> sentAt) */
 	pendingPings: Map<number, number>;
+
+	/** Last time we received any response from this peer */
+	lastResponseTime: number;
 }
 
 /**
@@ -154,12 +169,18 @@ export class WebRTCTransport implements TransportAdapter {
 	private readonly unreliableChannelConfig: RTCDataChannelInit;
 	private readonly maxReconnectAttempts: number;
 	private readonly reconnectDelay: number;
+	private readonly keepaliveInterval: number;
+	private readonly keepaliveTimeout: number;
 
 	private readonly peers: Map<string, PeerConnection> = new Map();
 	private readonly _connectedPeers: Set<string> = new Set();
 	private readonly peerMetrics: Map<string, PeerMetricsData> = new Map();
 
 	private signalingCallbacks: SignalingCallbacks | null = null;
+	private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+
+	/** Callback for keepalive ping - set by Session to send Ping messages */
+	onKeepalivePing: ((peerId: string) => void) | null = null;
 
 	onMessage: ((peerId: string, message: Uint8Array) => void) | null = null;
 	onConnect: ((peerId: string) => void) | null = null;
@@ -182,6 +203,15 @@ export class WebRTCTransport implements TransportAdapter {
 		this.maxReconnectAttempts =
 			config.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS;
 		this.reconnectDelay = config.reconnectDelay ?? DEFAULT_RECONNECT_DELAY_MS;
+		this.keepaliveInterval =
+			config.keepaliveInterval ?? DEFAULT_KEEPALIVE_INTERVAL_MS;
+		this.keepaliveTimeout =
+			config.keepaliveTimeout ?? DEFAULT_KEEPALIVE_TIMEOUT_MS;
+
+		// Start keepalive timer if enabled
+		if (this.keepaliveInterval > 0) {
+			this.startKeepaliveTimer();
+		}
 	}
 
 	/**
@@ -332,6 +362,16 @@ export class WebRTCTransport implements TransportAdapter {
 		for (const peerId of [...this.peers.keys()]) {
 			this.disconnect(peerId);
 		}
+		this.stopKeepaliveTimer();
+	}
+
+	/**
+	 * Destroy the transport and clean up all resources.
+	 */
+	destroy(): void {
+		this.disconnectAll();
+		this.stopKeepaliveTimer();
+		this.peerMetrics.clear();
 	}
 
 	/**
@@ -572,7 +612,7 @@ export class WebRTCTransport implements TransportAdapter {
 	 */
 	private getReconnectDelay(attempt: number): number {
 		// Exponential backoff: baseDelay * 2^(attempt-1)
-		const delay = this.reconnectDelay * Math.pow(2, attempt - 1);
+		const delay = this.reconnectDelay * 2 ** (attempt - 1);
 		return Math.min(delay, MAX_RECONNECT_DELAY_MS);
 	}
 
@@ -718,17 +758,85 @@ export class WebRTCTransport implements TransportAdapter {
 	private getOrCreateMetrics(peerId: string): PeerMetricsData {
 		let metrics = this.peerMetrics.get(peerId);
 		if (!metrics) {
+			const now = Date.now();
 			metrics = {
 				rttSamples: [],
 				rtt: 0,
 				jitter: 0,
 				packetLoss: 0,
-				lastUpdated: Date.now(),
+				lastUpdated: now,
 				pendingPings: new Map(),
+				lastResponseTime: now,
 			};
 			this.peerMetrics.set(peerId, metrics);
 		}
 		return metrics;
+	}
+
+	/**
+	 * Start the keepalive timer.
+	 */
+	private startKeepaliveTimer(): void {
+		if (this.keepaliveTimer) {
+			return;
+		}
+
+		this.keepaliveTimer = setInterval(() => {
+			this.checkKeepalives();
+		}, this.keepaliveInterval);
+
+		// Unref to not block process exit (important for tests)
+		if (this.keepaliveTimer.unref) {
+			this.keepaliveTimer.unref();
+		}
+	}
+
+	/**
+	 * Stop the keepalive timer.
+	 */
+	private stopKeepaliveTimer(): void {
+		if (this.keepaliveTimer) {
+			clearInterval(this.keepaliveTimer);
+			this.keepaliveTimer = null;
+		}
+	}
+
+	/**
+	 * Check keepalive status for all connected peers.
+	 * Sends pings and detects dead connections.
+	 */
+	private checkKeepalives(): void {
+		const now = Date.now();
+
+		for (const peerId of this._connectedPeers) {
+			const metrics = this.peerMetrics.get(peerId);
+
+			// Check for timeout
+			if (metrics && now - metrics.lastResponseTime > this.keepaliveTimeout) {
+				// Peer is dead - trigger disconnect
+				const peer = this.peers.get(peerId);
+				if (peer) {
+					this.handleConnectionFailure(peerId, peer);
+				}
+				continue;
+			}
+
+			// Send keepalive ping via callback
+			if (this.onKeepalivePing) {
+				this.onKeepalivePing(peerId);
+			}
+		}
+	}
+
+	/**
+	 * Record that we received a response from a peer.
+	 * Call this when any message is received from a peer.
+	 *
+	 * @param peerId - The peer's ID
+	 */
+	recordPeerResponse(peerId: string): void {
+		const metrics = this.getOrCreateMetrics(peerId);
+		metrics.lastResponseTime = Date.now();
 	}
 
 	/**

@@ -42,6 +42,27 @@ class TestGame implements Game {
 	}
 }
 
+/**
+ * Helper to get a transport from the map with assertion.
+ */
+function getTransport(
+	transports: Map<string, LocalTransport>,
+	peerId: string,
+): LocalTransport {
+	const transport = transports.get(peerId);
+	assert.ok(transport, `Transport for ${peerId} should exist`);
+	return transport;
+}
+
+/**
+ * Helper to get room ID with assertion.
+ */
+function getRoomId(session: Session): string {
+	const roomId = session.roomId;
+	assert.ok(roomId, "Room ID should exist");
+	return roomId;
+}
+
 describe("Session", () => {
 	describe("room creation", () => {
 		it("should create a room and become host", async () => {
@@ -71,8 +92,8 @@ describe("Session", () => {
 	describe("joining rooms", () => {
 		it("should join an existing room", async () => {
 			const transports = createLocalTransportGroup(["host", "client"]);
-			const hostTransport = transports.get("host")!;
-			const clientTransport = transports.get("client")!;
+			const hostTransport = getTransport(transports, "host");
+			const clientTransport = getTransport(transports, "client");
 
 			const hostGame = new TestGame();
 			const clientGame = new TestGame();
@@ -101,8 +122,8 @@ describe("Session", () => {
 	describe("starting game", () => {
 		it("should start game from lobby", async () => {
 			const transports = createLocalTransportGroup(["host", "client"]);
-			const hostTransport = transports.get("host")!;
-			const clientTransport = transports.get("client")!;
+			const hostTransport = getTransport(transports, "host");
+			const clientTransport = getTransport(transports, "client");
 
 			const hostGame = new TestGame();
 			const clientGame = new TestGame();
@@ -117,7 +138,7 @@ describe("Session", () => {
 			});
 
 			await hostSession.createRoom();
-			await clientSession.joinRoom(hostSession.roomId!, "host");
+			await clientSession.joinRoom(getRoomId(hostSession), "host");
 			clientTransport.flush();
 			hostTransport.flush();
 
@@ -132,8 +153,8 @@ describe("Session", () => {
 
 		it("should throw when non-host tries to start", async () => {
 			const transports = createLocalTransportGroup(["host", "client"]);
-			const hostTransport = transports.get("host")!;
-			const clientTransport = transports.get("client")!;
+			const hostTransport = getTransport(transports, "host");
+			const clientTransport = getTransport(transports, "client");
 
 			const hostGame = new TestGame();
 			const clientGame = new TestGame();
@@ -148,7 +169,7 @@ describe("Session", () => {
 			});
 
 			await hostSession.createRoom();
-			await clientSession.joinRoom(hostSession.roomId!, "host");
+			await clientSession.joinRoom(getRoomId(hostSession), "host");
 			clientTransport.flush();
 			hostTransport.flush();
 
@@ -174,8 +195,8 @@ describe("Session", () => {
 
 		it("should sync between two players", async () => {
 			const transports = createLocalTransportGroup(["host", "client"]);
-			const hostTransport = transports.get("host")!;
-			const clientTransport = transports.get("client")!;
+			const hostTransport = getTransport(transports, "host");
+			const clientTransport = getTransport(transports, "client");
 
 			const hostGame = new TestGame();
 			const clientGame = new TestGame();
@@ -190,7 +211,7 @@ describe("Session", () => {
 			});
 
 			await hostSession.createRoom();
-			await clientSession.joinRoom(hostSession.roomId!, "host");
+			await clientSession.joinRoom(getRoomId(hostSession), "host");
 			clientTransport.flush(); // JoinRequest to host
 			hostTransport.flush(); // JoinAccept to client
 
@@ -317,8 +338,8 @@ describe("Session", () => {
 
 		it("should emit playerJoined events", async () => {
 			const transports = createLocalTransportGroup(["host", "client"]);
-			const hostTransport = transports.get("host")!;
-			const clientTransport = transports.get("client")!;
+			const hostTransport = getTransport(transports, "host");
+			const clientTransport = getTransport(transports, "client");
 
 			const hostGame = new TestGame();
 			const clientGame = new TestGame();
@@ -338,7 +359,7 @@ describe("Session", () => {
 			});
 
 			await hostSession.createRoom();
-			await clientSession.joinRoom(hostSession.roomId!, "host");
+			await clientSession.joinRoom(getRoomId(hostSession), "host");
 			clientTransport.flush();
 			hostTransport.flush();
 
@@ -383,13 +404,15 @@ describe("Session", () => {
 			}
 
 			// P1 creates room
-			const p1Session = sessions.get("p1")!;
+			const p1Session = sessions.get("p1");
+			assert.ok(p1Session, "P1 session should exist");
 			await p1Session.createRoom();
 
 			// P2 and P3 join
 			for (const peerId of ["p2", "p3"]) {
-				const session = sessions.get(peerId)!;
-				await session.joinRoom(p1Session.roomId!, "p1");
+				const session = sessions.get(peerId);
+				assert.ok(session, `Session for ${peerId} should exist`);
+				await session.joinRoom(getRoomId(p1Session), "p1");
 				flushAll();
 			}
 
@@ -435,8 +458,8 @@ describe("Session", () => {
 			const transports = createLocalTransportGroup(["host", "client"], {
 				latency: 50, // 50ms latency
 			});
-			const hostTransport = transports.get("host")!;
-			const clientTransport = transports.get("client")!;
+			const hostTransport = getTransport(transports, "host");
+			const clientTransport = getTransport(transports, "client");
 
 			const hostGame = new TestGame();
 			const clientGame = new TestGame();
@@ -451,7 +474,7 @@ describe("Session", () => {
 			});
 
 			await hostSession.createRoom();
-			await clientSession.joinRoom(hostSession.roomId!, "host");
+			await clientSession.joinRoom(getRoomId(hostSession), "host");
 
 			// Flush initial messages (need to alternate to handle request/response)
 			clientTransport.tick(100); // JoinRequest to host
@@ -509,8 +532,8 @@ describe("Session", () => {
 	describe("request sync", () => {
 		it("should allow requesting sync from host", async () => {
 			const transports = createLocalTransportGroup(["host", "client"]);
-			const hostTransport = transports.get("host")!;
-			const clientTransport = transports.get("client")!;
+			const hostTransport = getTransport(transports, "host");
+			const clientTransport = getTransport(transports, "client");
 
 			const hostGame = new TestGame();
 			const clientGame = new TestGame();
@@ -525,7 +548,7 @@ describe("Session", () => {
 			});
 
 			await hostSession.createRoom();
-			await clientSession.joinRoom(hostSession.roomId!, "host");
+			await clientSession.joinRoom(getRoomId(hostSession), "host");
 			clientTransport.flush(); // JoinRequest
 			hostTransport.flush(); // JoinAccept
 

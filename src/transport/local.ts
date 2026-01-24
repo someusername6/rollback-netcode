@@ -369,8 +369,12 @@ export function createLocalTransportGroup(
 	// Link all transports together (full mesh)
 	const transportArray = Array.from(transports.values());
 	for (let i = 0; i < transportArray.length; i++) {
+		const transportI = transportArray[i];
+		if (!transportI) continue;
 		for (let j = i + 1; j < transportArray.length; j++) {
-			LocalTransport.link(transportArray[i]!, transportArray[j]!);
+			const transportJ = transportArray[j];
+			if (!transportJ) continue;
+			LocalTransport.link(transportI, transportJ);
 		}
 	}
 
