@@ -12,31 +12,31 @@ import { asTick } from "../types.js";
  * State for a single player's inputs.
  */
 interface PlayerInputState {
-  /** Tick when the player joined */
-  joinTick: Tick;
+	/** Tick when the player joined */
+	joinTick: Tick;
 
-  /** Tick when the player left (null if still active) */
-  leaveTick: Tick | null;
+	/** Tick when the player left (null if still active) */
+	leaveTick: Tick | null;
 
-  /** Map of tick -> received input */
-  received: Map<Tick, Uint8Array>;
+	/** Map of tick -> received input */
+	received: Map<Tick, Uint8Array>;
 
-  /** Highest consecutive tick for which we have confirmed input */
-  confirmedTick: Tick;
+	/** Highest consecutive tick for which we have confirmed input */
+	confirmedTick: Tick;
 
-  /** Map of tick -> input that was actually used in simulation (may be predicted) */
-  usedInputs: Map<Tick, Uint8Array>;
+	/** Map of tick -> input that was actually used in simulation (may be predicted) */
+	usedInputs: Map<Tick, Uint8Array>;
 }
 
 /**
  * Compares two Uint8Arrays for equality.
  */
 function inputsEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		if (a[i] !== b[i]) return false;
+	}
+	return true;
 }
 
 /**
@@ -49,397 +49,397 @@ function inputsEqual(a: Uint8Array, b: Uint8Array): boolean {
  * - Confirmed tick tracking
  */
 export class InputBuffer {
-  private readonly players: Map<PlayerId, PlayerInputState> = new Map();
+	private readonly players: Map<PlayerId, PlayerInputState> = new Map();
 
-  /**
-   * Add a player to the buffer.
-   *
-   * @param playerId - The player's ID
-   * @param joinTick - The tick at which the player joins
-   */
-  addPlayer(playerId: PlayerId, joinTick: Tick): void {
-    if (this.players.has(playerId)) {
-      const existing = this.players.get(playerId)!;
-      // If player is rejoining, update join tick and clear leave tick
-      if (existing.leaveTick !== null) {
-        existing.joinTick = joinTick;
-        existing.leaveTick = null;
-        existing.confirmedTick = asTick(joinTick - 1);
-        existing.received.clear();
-        existing.usedInputs.clear();
-      }
-      return;
-    }
+	/**
+	 * Add a player to the buffer.
+	 *
+	 * @param playerId - The player's ID
+	 * @param joinTick - The tick at which the player joins
+	 */
+	addPlayer(playerId: PlayerId, joinTick: Tick): void {
+		if (this.players.has(playerId)) {
+			const existing = this.players.get(playerId)!;
+			// If player is rejoining, update join tick and clear leave tick
+			if (existing.leaveTick !== null) {
+				existing.joinTick = joinTick;
+				existing.leaveTick = null;
+				existing.confirmedTick = asTick(joinTick - 1);
+				existing.received.clear();
+				existing.usedInputs.clear();
+			}
+			return;
+		}
 
-    this.players.set(playerId, {
-      joinTick,
-      leaveTick: null,
-      received: new Map(),
-      confirmedTick: asTick(joinTick - 1), // No inputs confirmed yet
-      usedInputs: new Map(),
-    });
-  }
+		this.players.set(playerId, {
+			joinTick,
+			leaveTick: null,
+			received: new Map(),
+			confirmedTick: asTick(joinTick - 1), // No inputs confirmed yet
+			usedInputs: new Map(),
+		});
+	}
 
-  /**
-   * Mark a player as having left.
-   *
-   * @param playerId - The player's ID
-   * @param leaveTick - The tick at which the player leaves
-   */
-  removePlayer(playerId: PlayerId, leaveTick: Tick): void {
-    const player = this.players.get(playerId);
-    if (player) {
-      player.leaveTick = leaveTick;
-    }
-  }
+	/**
+	 * Mark a player as having left.
+	 *
+	 * @param playerId - The player's ID
+	 * @param leaveTick - The tick at which the player leaves
+	 */
+	removePlayer(playerId: PlayerId, leaveTick: Tick): void {
+		const player = this.players.get(playerId);
+		if (player) {
+			player.leaveTick = leaveTick;
+		}
+	}
 
-  /**
-   * Check if a player is active at a given tick.
-   *
-   * @param playerId - The player's ID
-   * @param tick - The tick to check
-   * @returns true if the player is active at that tick
-   */
-  isPlayerActive(playerId: PlayerId, tick: Tick): boolean {
-    const player = this.players.get(playerId);
-    if (!player) return false;
+	/**
+	 * Check if a player is active at a given tick.
+	 *
+	 * @param playerId - The player's ID
+	 * @param tick - The tick to check
+	 * @returns true if the player is active at that tick
+	 */
+	isPlayerActive(playerId: PlayerId, tick: Tick): boolean {
+		const player = this.players.get(playerId);
+		if (!player) return false;
 
-    if (tick < player.joinTick) return false;
-    if (player.leaveTick !== null && tick >= player.leaveTick) return false;
+		if (tick < player.joinTick) return false;
+		if (player.leaveTick !== null && tick >= player.leaveTick) return false;
 
-    return true;
-  }
+		return true;
+	}
 
-  /**
-   * Get all players that are active at a given tick.
-   *
-   * @param tick - The tick to check
-   * @returns Array of active player IDs
-   */
-  getActivePlayers(tick: Tick): PlayerId[] {
-    const active: PlayerId[] = [];
-    for (const [playerId] of this.players) {
-      if (this.isPlayerActive(playerId, tick)) {
-        active.push(playerId);
-      }
-    }
-    return active;
-  }
+	/**
+	 * Get all players that are active at a given tick.
+	 *
+	 * @param tick - The tick to check
+	 * @returns Array of active player IDs
+	 */
+	getActivePlayers(tick: Tick): PlayerId[] {
+		const active: PlayerId[] = [];
+		for (const [playerId] of this.players) {
+			if (this.isPlayerActive(playerId, tick)) {
+				active.push(playerId);
+			}
+		}
+		return active;
+	}
 
-  /**
-   * Get all player IDs (active or not).
-   *
-   * @returns Array of all player IDs
-   */
-  getAllPlayers(): PlayerId[] {
-    return Array.from(this.players.keys());
-  }
+	/**
+	 * Get all player IDs (active or not).
+	 *
+	 * @returns Array of all player IDs
+	 */
+	getAllPlayers(): PlayerId[] {
+		return Array.from(this.players.keys());
+	}
 
-  /**
-   * Receive an input from a player.
-   * The input is copied to prevent external mutation.
-   *
-   * @param playerId - The player's ID
-   * @param tick - The tick the input is for
-   * @param input - The input data
-   */
-  receiveInput(playerId: PlayerId, tick: Tick, input: Uint8Array): void {
-    const player = this.players.get(playerId);
-    if (!player) return;
+	/**
+	 * Receive an input from a player.
+	 * The input is copied to prevent external mutation.
+	 *
+	 * @param playerId - The player's ID
+	 * @param tick - The tick the input is for
+	 * @param input - The input data
+	 */
+	receiveInput(playerId: PlayerId, tick: Tick, input: Uint8Array): void {
+		const player = this.players.get(playerId);
+		if (!player) return;
 
-    // Don't accept inputs for ticks before the player joined
-    if (tick < player.joinTick) return;
+		// Don't accept inputs for ticks before the player joined
+		if (tick < player.joinTick) return;
 
-    // Don't accept inputs for ticks after the player left
-    if (player.leaveTick !== null && tick >= player.leaveTick) return;
+		// Don't accept inputs for ticks after the player left
+		if (player.leaveTick !== null && tick >= player.leaveTick) return;
 
-    // Copy input to prevent external mutation
-    const inputCopy = new Uint8Array(input.length);
-    inputCopy.set(input);
+		// Copy input to prevent external mutation
+		const inputCopy = new Uint8Array(input.length);
+		inputCopy.set(input);
 
-    player.received.set(tick, inputCopy);
+		player.received.set(tick, inputCopy);
 
-    // Update confirmed tick (highest consecutive tick with input)
-    this.updateConfirmedTick(player);
-  }
+		// Update confirmed tick (highest consecutive tick with input)
+		this.updateConfirmedTick(player);
+	}
 
-  /**
-   * Update the confirmed tick for a player.
-   * Confirmed tick is the highest tick where all ticks from joinTick
-   * to that tick have received inputs.
-   */
-  private updateConfirmedTick(player: PlayerInputState): void {
-    let tick = player.confirmedTick + 1;
-    while (player.received.has(asTick(tick))) {
-      tick++;
-    }
-    player.confirmedTick = asTick(tick - 1);
-  }
+	/**
+	 * Update the confirmed tick for a player.
+	 * Confirmed tick is the highest tick where all ticks from joinTick
+	 * to that tick have received inputs.
+	 */
+	private updateConfirmedTick(player: PlayerInputState): void {
+		let tick = player.confirmedTick + 1;
+		while (player.received.has(asTick(tick))) {
+			tick++;
+		}
+		player.confirmedTick = asTick(tick - 1);
+	}
 
-  /**
-   * Get the received input for a player at a specific tick.
-   *
-   * @param playerId - The player's ID
-   * @param tick - The tick to get input for
-   * @returns The input, or undefined if not received
-   */
-  getInput(playerId: PlayerId, tick: Tick): Uint8Array | undefined {
-    const player = this.players.get(playerId);
-    if (!player) return undefined;
-    return player.received.get(tick);
-  }
+	/**
+	 * Get the received input for a player at a specific tick.
+	 *
+	 * @param playerId - The player's ID
+	 * @param tick - The tick to get input for
+	 * @returns The input, or undefined if not received
+	 */
+	getInput(playerId: PlayerId, tick: Tick): Uint8Array | undefined {
+		const player = this.players.get(playerId);
+		if (!player) return undefined;
+		return player.received.get(tick);
+	}
 
-  /**
-   * Get the confirmed tick for a player.
-   * This is the highest consecutive tick for which we have received input.
-   *
-   * @param playerId - The player's ID
-   * @returns The confirmed tick, or undefined if player not found
-   */
-  getConfirmedTick(playerId: PlayerId): Tick | undefined {
-    const player = this.players.get(playerId);
-    if (!player) return undefined;
-    return player.confirmedTick;
-  }
+	/**
+	 * Get the confirmed tick for a player.
+	 * This is the highest consecutive tick for which we have received input.
+	 *
+	 * @param playerId - The player's ID
+	 * @returns The confirmed tick, or undefined if player not found
+	 */
+	getConfirmedTick(playerId: PlayerId): Tick | undefined {
+		const player = this.players.get(playerId);
+		if (!player) return undefined;
+		return player.confirmedTick;
+	}
 
-  /**
-   * Get the join tick for a player.
-   *
-   * @param playerId - The player's ID
-   * @returns The join tick, or undefined if player not found
-   */
-  getJoinTick(playerId: PlayerId): Tick | undefined {
-    const player = this.players.get(playerId);
-    return player?.joinTick;
-  }
+	/**
+	 * Get the join tick for a player.
+	 *
+	 * @param playerId - The player's ID
+	 * @returns The join tick, or undefined if player not found
+	 */
+	getJoinTick(playerId: PlayerId): Tick | undefined {
+		const player = this.players.get(playerId);
+		return player?.joinTick;
+	}
 
-  /**
-   * Get the leave tick for a player.
-   *
-   * @param playerId - The player's ID
-   * @returns The leave tick, or null/undefined if player hasn't left or not found
-   */
-  getLeaveTick(playerId: PlayerId): Tick | null | undefined {
-    const player = this.players.get(playerId);
-    return player?.leaveTick;
-  }
+	/**
+	 * Get the leave tick for a player.
+	 *
+	 * @param playerId - The player's ID
+	 * @returns The leave tick, or null/undefined if player hasn't left or not found
+	 */
+	getLeaveTick(playerId: PlayerId): Tick | null | undefined {
+		const player = this.players.get(playerId);
+		return player?.leaveTick;
+	}
 
-  /**
-   * Record the input that was actually used for a player at a tick.
-   * This may be the real input or a predicted input.
-   *
-   * @param playerId - The player's ID
-   * @param tick - The tick
-   * @param input - The input that was used
-   */
-  recordUsedInput(playerId: PlayerId, tick: Tick, input: Uint8Array): void {
-    const player = this.players.get(playerId);
-    if (!player) return;
+	/**
+	 * Record the input that was actually used for a player at a tick.
+	 * This may be the real input or a predicted input.
+	 *
+	 * @param playerId - The player's ID
+	 * @param tick - The tick
+	 * @param input - The input that was used
+	 */
+	recordUsedInput(playerId: PlayerId, tick: Tick, input: Uint8Array): void {
+		const player = this.players.get(playerId);
+		if (!player) return;
 
-    // Copy input
-    const inputCopy = new Uint8Array(input.length);
-    inputCopy.set(input);
+		// Copy input
+		const inputCopy = new Uint8Array(input.length);
+		inputCopy.set(input);
 
-    player.usedInputs.set(tick, inputCopy);
-  }
+		player.usedInputs.set(tick, inputCopy);
+	}
 
-  /**
-   * Get the input that was used for a player at a tick.
-   *
-   * @param playerId - The player's ID
-   * @param tick - The tick
-   * @returns The used input, or undefined if not recorded
-   */
-  getUsedInput(playerId: PlayerId, tick: Tick): Uint8Array | undefined {
-    const player = this.players.get(playerId);
-    if (!player) return undefined;
-    return player.usedInputs.get(tick);
-  }
+	/**
+	 * Get the input that was used for a player at a tick.
+	 *
+	 * @param playerId - The player's ID
+	 * @param tick - The tick
+	 * @returns The used input, or undefined if not recorded
+	 */
+	getUsedInput(playerId: PlayerId, tick: Tick): Uint8Array | undefined {
+		const player = this.players.get(playerId);
+		if (!player) return undefined;
+		return player.usedInputs.get(tick);
+	}
 
-  /**
-   * Find the first tick where a misprediction occurred for a player.
-   * A misprediction is when we used a predicted input that differs
-   * from the actual received input.
-   *
-   * @param playerId - The player's ID
-   * @param fromTick - Start searching from this tick
-   * @returns The tick of the first misprediction, or undefined if none found
-   */
-  findMisprediction(playerId: PlayerId, fromTick: Tick): Tick | undefined {
-    const player = this.players.get(playerId);
-    if (!player) return undefined;
+	/**
+	 * Find the first tick where a misprediction occurred for a player.
+	 * A misprediction is when we used a predicted input that differs
+	 * from the actual received input.
+	 *
+	 * @param playerId - The player's ID
+	 * @param fromTick - Start searching from this tick
+	 * @returns The tick of the first misprediction, or undefined if none found
+	 */
+	findMisprediction(playerId: PlayerId, fromTick: Tick): Tick | undefined {
+		const player = this.players.get(playerId);
+		if (!player) return undefined;
 
-    // Check each tick from fromTick up to confirmedTick
-    for (let tick = fromTick; tick <= player.confirmedTick; tick++) {
-      const received = player.received.get(asTick(tick));
-      const used = player.usedInputs.get(asTick(tick));
+		// Check each tick from fromTick up to confirmedTick
+		for (let tick = fromTick; tick <= player.confirmedTick; tick++) {
+			const received = player.received.get(asTick(tick));
+			const used = player.usedInputs.get(asTick(tick));
 
-      // If we have both received and used inputs, compare them
-      if (received !== undefined && used !== undefined) {
-        if (!inputsEqual(received, used)) {
-          return asTick(tick);
-        }
-      }
-    }
+			// If we have both received and used inputs, compare them
+			if (received !== undefined && used !== undefined) {
+				if (!inputsEqual(received, used)) {
+					return asTick(tick);
+				}
+			}
+		}
 
-    return undefined;
-  }
+		return undefined;
+	}
 
-  /**
-   * Check if there are any mispredictions for a player in a tick range.
-   *
-   * @param playerId - The player's ID
-   * @param fromTick - Start of range (inclusive)
-   * @param toTick - End of range (inclusive)
-   * @returns true if any misprediction found
-   */
-  hasMisprediction(playerId: PlayerId, fromTick: Tick, toTick: Tick): boolean {
-    const player = this.players.get(playerId);
-    if (!player) return false;
+	/**
+	 * Check if there are any mispredictions for a player in a tick range.
+	 *
+	 * @param playerId - The player's ID
+	 * @param fromTick - Start of range (inclusive)
+	 * @param toTick - End of range (inclusive)
+	 * @returns true if any misprediction found
+	 */
+	hasMisprediction(playerId: PlayerId, fromTick: Tick, toTick: Tick): boolean {
+		const player = this.players.get(playerId);
+		if (!player) return false;
 
-    for (let tick = fromTick; tick <= toTick; tick++) {
-      const received = player.received.get(asTick(tick));
-      const used = player.usedInputs.get(asTick(tick));
+		for (let tick = fromTick; tick <= toTick; tick++) {
+			const received = player.received.get(asTick(tick));
+			const used = player.usedInputs.get(asTick(tick));
 
-      if (received !== undefined && used !== undefined) {
-        if (!inputsEqual(received, used)) {
-          return true;
-        }
-      }
-    }
+			if (received !== undefined && used !== undefined) {
+				if (!inputsEqual(received, used)) {
+					return true;
+				}
+			}
+		}
 
-    return false;
-  }
+		return false;
+	}
 
-  /**
-   * Get the last confirmed input for a player.
-   * Useful for input prediction.
-   *
-   * @param playerId - The player's ID
-   * @returns The last confirmed input, or undefined if none
-   */
-  getLastConfirmedInput(playerId: PlayerId): Uint8Array | undefined {
-    const player = this.players.get(playerId);
-    if (!player) return undefined;
+	/**
+	 * Get the last confirmed input for a player.
+	 * Useful for input prediction.
+	 *
+	 * @param playerId - The player's ID
+	 * @returns The last confirmed input, or undefined if none
+	 */
+	getLastConfirmedInput(playerId: PlayerId): Uint8Array | undefined {
+		const player = this.players.get(playerId);
+		if (!player) return undefined;
 
-    // Find the most recent received input
-    let lastTick: Tick | undefined;
-    for (const tick of player.received.keys()) {
-      if (lastTick === undefined || tick > lastTick) {
-        lastTick = tick;
-      }
-    }
+		// Find the most recent received input
+		let lastTick: Tick | undefined;
+		for (const tick of player.received.keys()) {
+			if (lastTick === undefined || tick > lastTick) {
+				lastTick = tick;
+			}
+		}
 
-    if (lastTick !== undefined) {
-      return player.received.get(lastTick);
-    }
+		if (lastTick !== undefined) {
+			return player.received.get(lastTick);
+		}
 
-    return undefined;
-  }
+		return undefined;
+	}
 
-  /**
-   * Remove all data before a given tick.
-   * Used to clean up old inputs that are no longer needed.
-   *
-   * @param tick - Remove all data for ticks < this value
-   */
-  pruneBeforeTick(tick: Tick): void {
-    for (const player of this.players.values()) {
-      // Remove old received inputs
-      for (const t of player.received.keys()) {
-        if (t < tick) {
-          player.received.delete(t);
-        }
-      }
+	/**
+	 * Remove all data before a given tick.
+	 * Used to clean up old inputs that are no longer needed.
+	 *
+	 * @param tick - Remove all data for ticks < this value
+	 */
+	pruneBeforeTick(tick: Tick): void {
+		for (const player of this.players.values()) {
+			// Remove old received inputs
+			for (const t of player.received.keys()) {
+				if (t < tick) {
+					player.received.delete(t);
+				}
+			}
 
-      // Remove old used inputs
-      for (const t of player.usedInputs.keys()) {
-        if (t < tick) {
-          player.usedInputs.delete(t);
-        }
-      }
-    }
-  }
+			// Remove old used inputs
+			for (const t of player.usedInputs.keys()) {
+				if (t < tick) {
+					player.usedInputs.delete(t);
+				}
+			}
+		}
+	}
 
-  /**
-   * Clear used inputs for a player from a given tick onwards.
-   * Called during rollback to allow re-recording inputs.
-   *
-   * @param playerId - The player's ID
-   * @param fromTick - Clear from this tick onwards
-   */
-  clearUsedInputsFrom(playerId: PlayerId, fromTick: Tick): void {
-    const player = this.players.get(playerId);
-    if (!player) return;
+	/**
+	 * Clear used inputs for a player from a given tick onwards.
+	 * Called during rollback to allow re-recording inputs.
+	 *
+	 * @param playerId - The player's ID
+	 * @param fromTick - Clear from this tick onwards
+	 */
+	clearUsedInputsFrom(playerId: PlayerId, fromTick: Tick): void {
+		const player = this.players.get(playerId);
+		if (!player) return;
 
-    for (const tick of player.usedInputs.keys()) {
-      if (tick >= fromTick) {
-        player.usedInputs.delete(tick);
-      }
-    }
-  }
+		for (const tick of player.usedInputs.keys()) {
+			if (tick >= fromTick) {
+				player.usedInputs.delete(tick);
+			}
+		}
+	}
 
-  /**
-   * Clear all used inputs from a given tick onwards for all players.
-   *
-   * @param fromTick - Clear from this tick onwards
-   */
-  clearAllUsedInputsFrom(fromTick: Tick): void {
-    for (const playerId of this.players.keys()) {
-      this.clearUsedInputsFrom(playerId, fromTick);
-    }
-  }
+	/**
+	 * Clear all used inputs from a given tick onwards for all players.
+	 *
+	 * @param fromTick - Clear from this tick onwards
+	 */
+	clearAllUsedInputsFrom(fromTick: Tick): void {
+		for (const playerId of this.players.keys()) {
+			this.clearUsedInputsFrom(playerId, fromTick);
+		}
+	}
 
-  /**
-   * Get the minimum confirmed tick across all active players at a given tick.
-   *
-   * @param tick - The reference tick for determining active players
-   * @returns The minimum confirmed tick, or undefined if no active players
-   */
-  getMinConfirmedTick(tick: Tick): Tick | undefined {
-    let minTick: Tick | undefined;
+	/**
+	 * Get the minimum confirmed tick across all active players at a given tick.
+	 *
+	 * @param tick - The reference tick for determining active players
+	 * @returns The minimum confirmed tick, or undefined if no active players
+	 */
+	getMinConfirmedTick(tick: Tick): Tick | undefined {
+		let minTick: Tick | undefined;
 
-    for (const [playerId, player] of this.players) {
-      if (this.isPlayerActive(playerId, tick)) {
-        if (minTick === undefined || player.confirmedTick < minTick) {
-          minTick = player.confirmedTick;
-        }
-      }
-    }
+		for (const [playerId, player] of this.players) {
+			if (this.isPlayerActive(playerId, tick)) {
+				if (minTick === undefined || player.confirmedTick < minTick) {
+					minTick = player.confirmedTick;
+				}
+			}
+		}
 
-    return minTick;
-  }
+		return minTick;
+	}
 
-  /**
-   * Check if we have all inputs for a given tick from all active players.
-   *
-   * @param tick - The tick to check
-   * @returns true if all inputs are available
-   */
-  hasAllInputsForTick(tick: Tick): boolean {
-    for (const [playerId] of this.players) {
-      if (this.isPlayerActive(playerId, tick)) {
-        if (!this.getInput(playerId, tick)) {
-          return false;
-        }
-      }
-    }
-    return true;
-  }
+	/**
+	 * Check if we have all inputs for a given tick from all active players.
+	 *
+	 * @param tick - The tick to check
+	 * @returns true if all inputs are available
+	 */
+	hasAllInputsForTick(tick: Tick): boolean {
+		for (const [playerId] of this.players) {
+			if (this.isPlayerActive(playerId, tick)) {
+				if (!this.getInput(playerId, tick)) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
 
-  /**
-   * Clear all data for a player.
-   *
-   * @param playerId - The player's ID
-   */
-  clearPlayer(playerId: PlayerId): void {
-    this.players.delete(playerId);
-  }
+	/**
+	 * Clear all data for a player.
+	 *
+	 * @param playerId - The player's ID
+	 */
+	clearPlayer(playerId: PlayerId): void {
+		this.players.delete(playerId);
+	}
 
-  /**
-   * Clear all players and data.
-   */
-  clear(): void {
-    this.players.clear();
-  }
+	/**
+	 * Clear all players and data.
+	 */
+	clear(): void {
+		this.players.clear();
+	}
 }
