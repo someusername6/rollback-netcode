@@ -3,15 +3,15 @@ import { beforeEach, describe, it } from "node:test";
 import {
 	LocalTransport,
 	createLocalTransportGroup,
-} from "../transport/local.js";
+} from "../../src/transport/local.js";
 import {
 	type Game,
 	type PlayerId,
 	SessionState,
 	asPlayerId,
 	asTick,
-} from "../types.js";
-import { type Session, createSession } from "./session.js";
+} from "../../src/types.js";
+import { type Session, createSession } from "../../src/session/session.js";
 
 /**
  * Simple test game that tracks position.

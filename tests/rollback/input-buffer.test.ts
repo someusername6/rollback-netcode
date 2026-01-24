@@ -1,7 +1,7 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
-import { asPlayerId, asTick } from "../types.js";
-import { InputBuffer } from "./input-buffer.js";
+import { asPlayerId, asTick } from "../../src/types.js";
+import { InputBuffer } from "../../src/rollback/input-buffer.js";
 
 describe("InputBuffer", () => {
 	describe("addPlayer and removePlayer", () => {

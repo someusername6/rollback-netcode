@@ -1,8 +1,8 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
-import { PauseReason, PlayerRole, asPlayerId, asTick } from "../types.js";
-import { DecodeError, decodeMessage, encodeMessage } from "./encoding.js";
-import { MessageType } from "./messages.js";
+import { PauseReason, PlayerRole, asPlayerId, asTick } from "../../src/types.js";
+import { DecodeError, decodeMessage, encodeMessage } from "../../src/protocol/encoding.js";
+import { MessageType } from "../../src/protocol/messages.js";
 
 describe("Message Encoding/Decoding", () => {
 	describe("InputMessage", () => {

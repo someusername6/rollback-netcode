@@ -32,34 +32,24 @@ import {
 } from "../types.js";
 
 import { type DebugLogger, createDebugLogger } from "../debug.js";
-import { decodeMessage, encodeMessage } from "../protocol/encoding.js";
+import { encodeMessage } from "../protocol/encoding.js";
 import {
 	type Message,
 	MessageType,
-	isDisconnectReportMessage,
-	isDropPlayerMessage,
-	isHashMessage,
-	isInputMessage,
-	isJoinAcceptMessage,
-	isJoinRejectMessage,
-	isJoinRequestMessage,
-	isLagReportMessage,
-	isPauseMessage,
-	isPingMessage,
-	isPlayerJoinedMessage,
-	isPlayerLeftMessage,
-	isPongMessage,
 	isReliableMessage,
-	isResumeCountdownMessage,
-	isResumeMessage,
-	isStateSyncMessage,
-	isSyncMessage,
-	isSyncRequestMessage,
 } from "../protocol/messages.js";
 import {
 	RollbackEngine,
 	type RollbackEngineConfig,
 } from "../rollback/engine.js";
+import { RateLimiter } from "../utils/rate-limiter.js";
+import { DesyncManager } from "./desync-manager.js";
+import {
+	DEFAULT_LAG_REPORT_COOLDOWN_TICKS,
+	LagMonitor,
+} from "./lag-monitor.js";
+import { type MessageHandlers, MessageRouter } from "./message-router.js";
+import { PlayerManager } from "./player-manager.js";
 import { type TopologyStrategy, createTopologyStrategy } from "./topology.js";
 
 /** Number of ticks of input to include in each message for redundancy */
@@ -73,9 +63,6 @@ const JOIN_REQUEST_WINDOW_MS = 10000;
 
 /** Interval for cleaning up stale rate limit entries (in milliseconds) */
 const RATE_LIMIT_CLEANUP_INTERVAL_MS = 60000;
-
-/** Minimum interval between lag reports for the same player (in ticks) */
-const LAG_REPORT_COOLDOWN_TICKS = 60;
 
 /**
  * Options for creating a session.
@@ -118,12 +105,12 @@ function generateRoomId(): string {
 	return id;
 }
 
-/**
- * Session manager that coordinates the rollback engine with network transport.
- */
 // Type alias for event handler functions
 type EventHandler = (...args: never[]) => void;
 
+/**
+ * Session manager that coordinates the rollback engine with network transport.
+ */
 export class Session {
 	private readonly game: Game;
 	private readonly transport: TransportAdapter;
@@ -135,25 +122,22 @@ export class Session {
 	private readonly topologyStrategy: TopologyStrategy;
 	private readonly debug: DebugLogger;
 
+	// Extracted components
+	private readonly playerManager: PlayerManager;
+	private readonly desyncManager: DesyncManager;
+	private readonly lagMonitor: LagMonitor;
+	private readonly joinRateLimiter: RateLimiter;
+	private readonly messageRouter: MessageRouter;
+
 	private _state: SessionState = SessionState.Disconnected;
 	private _isHost = false;
 	private _roomId: string | null = null;
 	private _localRole: PlayerRole = PlayerRole.Player;
-	private readonly _players: Map<PlayerId, PlayerInfo> = new Map();
 	private lastHashBroadcastTick: Tick = asTick(-1);
 	private inputRedundancy = DEFAULT_INPUT_REDUNDANCY;
 
-	/** Rate limiting: tracks join request timestamps per peer */
-	private readonly joinRequestTimes: Map<string, number[]> = new Map();
-
 	/** Timer for periodic rate limit cleanup */
 	private rateLimitCleanupTimer: ReturnType<typeof setInterval> | null = null;
-
-	/** Host-authority desync: hashes received from players, keyed by tick then playerId */
-	private readonly receivedHashes: Map<Tick, Map<PlayerId, number>> = new Map();
-
-	/** Last tick when a lag report was sent for each player (to avoid spam) */
-	private readonly lastLagReportTick: Map<PlayerId, Tick> = new Map();
 
 	/**
 	 * Create a new session.
@@ -176,6 +160,28 @@ export class Session {
 		// Create debug logger
 		this.debug = createDebugLogger(this.config.debug);
 
+		// Initialize extracted components
+		this.playerManager = new PlayerManager();
+		this.desyncManager = new DesyncManager({
+			topology: this.config.topology,
+			desyncAuthority: this.config.desyncAuthority,
+			hashInterval: this.config.hashInterval,
+		});
+		this.lagMonitor = new LagMonitor({
+			threshold: this.config.lagReportThreshold,
+			cooldownTicks: DEFAULT_LAG_REPORT_COOLDOWN_TICKS,
+		});
+		this.joinRateLimiter = new RateLimiter({
+			maxRequests: JOIN_REQUEST_LIMIT,
+			windowMs: JOIN_REQUEST_WINDOW_MS,
+		});
+
+		// Create message router with handlers
+		this.messageRouter = new MessageRouter(
+			this.createMessageHandlers(),
+			this.handleDecodeError.bind(this),
+		);
+
 		const engineConfig: RollbackEngineConfig = {
 			game: this.game,
 			localPlayerId: this._localPlayerId,
@@ -188,7 +194,7 @@ export class Session {
 		this.engine = new RollbackEngine(engineConfig);
 
 		// Initialize local player info
-		this._players.set(this._localPlayerId, {
+		this.playerManager.addPlayer({
 			id: this._localPlayerId,
 			connectionState: PlayerConnectionState.Connected,
 			joinTick: null,
@@ -214,11 +220,36 @@ export class Session {
 
 		// Start periodic rate limit cleanup (unref to not block process exit)
 		this.rateLimitCleanupTimer = setInterval(() => {
-			this.cleanupRateLimitEntries();
+			this.joinRateLimiter.cleanup();
 		}, RATE_LIMIT_CLEANUP_INTERVAL_MS);
 		if (this.rateLimitCleanupTimer.unref) {
 			this.rateLimitCleanupTimer.unref();
 		}
+	}
+
+	/**
+	 * Create message handlers bound to this session.
+	 */
+	private createMessageHandlers(): MessageHandlers {
+		return {
+			onInput: (msg) => this.handleInputMessage(msg),
+			onHash: (msg) => this.handleHashMessage(msg),
+			onSync: (msg) => this.handleSyncMessage(msg),
+			onSyncRequest: (msg) => this.handleSyncRequest(msg),
+			onJoinRequest: (msg, peerId) => this.handleJoinRequest(peerId, msg),
+			onJoinAccept: (msg) => this.handleJoinAccept(msg),
+			onJoinReject: (msg) => this.handleJoinReject(msg),
+			onPlayerJoined: (msg) => this.handlePlayerJoined(msg),
+			onPlayerLeft: (msg) => this.handlePlayerLeft(msg),
+			onPause: (msg) => this.handlePause(msg),
+			onResume: (msg) => this.handleResume(msg),
+			onPing: (msg, peerId) => this.handlePing(peerId, msg),
+			onPong: (msg, peerId) => this.handlePong(peerId, msg),
+			onDisconnectReport: (msg) => this.handleDisconnectReport(msg),
+			onLagReport: (msg) => this.handleLagReport(msg),
+			onResumeCountdown: (msg) => this.handleResumeCountdown(msg),
+			onDropPlayer: (msg) => this.handleDropPlayer(msg),
+		};
 	}
 
 	/**
@@ -232,7 +263,7 @@ export class Session {
 	 * Map of all players in the session.
 	 */
 	get players(): ReadonlyMap<PlayerId, PlayerInfo> {
-		return this._players;
+		return this.playerManager.asReadonlyMap();
 	}
 
 	/**
@@ -275,7 +306,7 @@ export class Session {
 			throw new Error("Cannot change role while in a room");
 		}
 		this._localRole = role;
-		const localPlayer = this._players.get(this.localPlayerId);
+		const localPlayer = this.playerManager.getPlayer(this.localPlayerId);
 		if (localPlayer) {
 			localPlayer.role = role;
 		}
@@ -331,8 +362,10 @@ export class Session {
 			this.rateLimitCleanupTimer = null;
 		}
 
-		// Clear rate limit entries
-		this.joinRequestTimes.clear();
+		// Clear component state
+		this.joinRateLimiter.clear();
+		this.lagMonitor.clear();
+		this.desyncManager.clear();
 
 		// Remove transport callbacks
 		this.transport.onMessage = null;
@@ -354,7 +387,7 @@ export class Session {
 		this._isHost = true;
 
 		// Update local player to be host
-		const localPlayer = this._players.get(this.localPlayerId);
+		const localPlayer = this.playerManager.getPlayer(this.localPlayerId);
 		if (localPlayer) {
 			localPlayer.isHost = true;
 			localPlayer.joinTick = asTick(0);
@@ -415,11 +448,11 @@ export class Session {
 		// Reset state
 		this._roomId = null;
 		this._isHost = false;
-		this._players.clear();
+		this.playerManager.clear();
 		this.engine.reset();
 
 		// Re-add local player
-		this._players.set(this.localPlayerId, {
+		this.playerManager.addPlayer({
 			id: this.localPlayerId,
 			connectionState: PlayerConnectionState.Connected,
 			joinTick: null,
@@ -445,7 +478,7 @@ export class Session {
 
 		// Set join ticks for all players, but only add players to engine
 		const startTick = asTick(0);
-		for (const player of this._players.values()) {
+		for (const player of this.playerManager) {
 			player.joinTick = startTick;
 			// Only players contribute inputs - spectators run simulation but don't send inputs
 			if (player.role === PlayerRole.Player) {
@@ -547,7 +580,7 @@ export class Session {
 			throw new Error("Only the host can drop players");
 		}
 
-		const player = this._players.get(playerId);
+		const player = this.playerManager.getPlayer(playerId);
 		if (!player) {
 			return;
 		}
@@ -702,6 +735,21 @@ export class Session {
 	}
 
 	/**
+	 * Handle decode error from message router.
+	 */
+	private handleDecodeError(
+		error: Error,
+		peerId: string,
+		dataLength: number,
+	): void {
+		this.emitError(error, {
+			source: ErrorSource.Protocol,
+			recoverable: true,
+			details: { peerId, dataLength },
+		});
+	}
+
+	/**
 	 * Handle incoming message from transport.
 	 */
 	private handleMessage(peerId: string, data: Uint8Array): void {
@@ -711,56 +759,8 @@ export class Session {
 		};
 		transportWithMetrics.recordPeerResponse?.(peerId);
 
-		let message: Message;
-		try {
-			message = decodeMessage(data);
-		} catch (error) {
-			this.emitError(
-				error instanceof Error ? error : new Error(String(error)),
-				{
-					source: ErrorSource.Protocol,
-					recoverable: true,
-					details: { peerId, dataLength: data.length },
-				},
-			);
-			return;
-		}
-
-		if (isInputMessage(message)) {
-			this.handleInputMessage(message);
-		} else if (isHashMessage(message)) {
-			this.handleHashMessage(message);
-		} else if (isSyncMessage(message) || isStateSyncMessage(message)) {
-			this.handleSyncMessage(message);
-		} else if (isSyncRequestMessage(message)) {
-			this.handleSyncRequest(message);
-		} else if (isJoinRequestMessage(message)) {
-			this.handleJoinRequest(peerId, message);
-		} else if (isJoinAcceptMessage(message)) {
-			this.handleJoinAccept(message);
-		} else if (isJoinRejectMessage(message)) {
-			this.handleJoinReject(message);
-		} else if (isPlayerJoinedMessage(message)) {
-			this.handlePlayerJoined(message);
-		} else if (isPlayerLeftMessage(message)) {
-			this.handlePlayerLeft(message);
-		} else if (isPauseMessage(message)) {
-			this.handlePause(message);
-		} else if (isResumeMessage(message)) {
-			this.handleResume(message);
-		} else if (isPingMessage(message)) {
-			this.handlePing(peerId, message);
-		} else if (isPongMessage(message)) {
-			this.handlePong(peerId, message);
-		} else if (isDisconnectReportMessage(message)) {
-			this.handleDisconnectReport(message);
-		} else if (isLagReportMessage(message)) {
-			this.handleLagReport(message);
-		} else if (isResumeCountdownMessage(message)) {
-			this.handleResumeCountdown(message);
-		} else if (isDropPlayerMessage(message)) {
-			this.handleDropPlayer(message);
-		}
+		// Route through message router
+		this.messageRouter.route(peerId, data);
 	}
 
 	/**
@@ -771,10 +771,7 @@ export class Session {
 
 		// Update player state if known
 		const playerId = asPlayerId(peerId);
-		const player = this._players.get(playerId);
-		if (player) {
-			player.connectionState = PlayerConnectionState.Connected;
-		}
+		this.playerManager.markConnected(playerId);
 	}
 
 	/**
@@ -810,7 +807,7 @@ export class Session {
 	 * Mark a player as disconnected and handle cleanup.
 	 */
 	private markPlayerDisconnected(playerId: PlayerId): void {
-		const player = this._players.get(playerId);
+		const player = this.playerManager.getPlayer(playerId);
 		if (!player) return;
 
 		player.connectionState = PlayerConnectionState.Disconnected;
@@ -869,12 +866,12 @@ export class Session {
 	private checkAndReportLag(): void {
 		// Only guests report lag in host-authority mode
 		if (this._isHost) return;
-		if (this.config.lagReportThreshold <= 0) return;
+		if (!this.lagMonitor.isEnabled) return;
 
 		const currentTick = this.engine.currentTick;
 
 		// Check each remote player's confirmed tick
-		for (const player of this._players.values()) {
+		for (const player of this.playerManager) {
 			if (player.id === this.localPlayerId) continue;
 			if (player.role !== PlayerRole.Player) continue;
 			if (player.connectionState !== PlayerConnectionState.Connected) continue;
@@ -883,29 +880,23 @@ export class Session {
 			if (confirmedTick === undefined) continue;
 
 			const ticksBehind = currentTick - confirmedTick;
+			const lagReport = this.lagMonitor.checkPlayer(
+				player.id,
+				ticksBehind,
+				currentTick,
+			);
 
-			if (ticksBehind >= this.config.lagReportThreshold) {
-				// Check cooldown to avoid spamming
-				const lastReport = this.lastLagReportTick.get(player.id);
-				if (
-					lastReport !== undefined &&
-					currentTick - lastReport < LAG_REPORT_COOLDOWN_TICKS
-				) {
-					continue;
-				}
-
-				// Send lag report to host
-				const lagReport: Message = {
+			if (lagReport) {
+				const lagReportMsg: Message = {
 					type: MessageType.LagReport,
-					laggyPlayerId: player.id,
-					ticksBehind,
+					laggyPlayerId: lagReport.laggyPlayerId,
+					ticksBehind: lagReport.ticksBehind,
 				};
-				this.sendToHost(lagReport);
-				this.lastLagReportTick.set(player.id, currentTick);
+				this.sendToHost(lagReportMsg);
 
 				this.debug.log("Sent lag report", {
-					laggyPlayerId: player.id,
-					ticksBehind,
+					laggyPlayerId: lagReport.laggyPlayerId,
+					ticksBehind: lagReport.ticksBehind,
 				});
 			}
 		}
@@ -973,10 +964,7 @@ export class Session {
 		message: Message & { type: MessageType.Hash },
 	): void {
 		// Host-authority mode: host collects and compares
-		if (
-			this.config.topology === Topology.Mesh &&
-			this.config.desyncAuthority === DesyncAuthority.Host
-		) {
+		if (this.desyncManager.isHostAuthority) {
 			if (this._isHost) {
 				this.recordHashAndCheckDesync(
 					message.tick,
@@ -988,18 +976,29 @@ export class Session {
 			return;
 		}
 
-		// Peer mode: existing comparison logic
+		// Peer mode: use desync manager for comparison
 		const localHash = this.engine.getHash(message.tick);
+		const desyncResult = this.desyncManager.checkPeerDesync(
+			message.tick,
+			localHash,
+			message.hash,
+			message.playerId,
+		);
 
-		if (localHash !== undefined && localHash !== message.hash) {
+		if (desyncResult) {
 			this.debug.warn("Desync detected", {
 				tick: message.tick,
-				localHash,
-				remoteHash: message.hash,
+				localHash: desyncResult.localHash,
+				remoteHash: desyncResult.remoteHash,
 				remotePlayer: message.playerId,
 			});
 
-			this.emit("desync", message.tick, localHash, message.hash);
+			this.emit(
+				"desync",
+				message.tick,
+				desyncResult.localHash,
+				desyncResult.remoteHash,
+			);
 
 			// Request sync if we're not the host
 			if (!this._isHost) {
@@ -1020,8 +1019,8 @@ export class Session {
 
 		// Update player list
 		for (const entry of message.playerTimeline) {
-			if (!this._players.has(entry.playerId)) {
-				this._players.set(entry.playerId, {
+			if (!this.playerManager.hasPlayer(entry.playerId)) {
+				this.playerManager.addPlayer({
 					id: entry.playerId,
 					connectionState: PlayerConnectionState.Connected,
 					joinTick: entry.joinTick,
@@ -1063,44 +1062,6 @@ export class Session {
 	}
 
 	/**
-	 * Check if a peer is rate limited for join requests.
-	 */
-	private isJoinRateLimited(peerId: string): boolean {
-		const now = Date.now();
-		const times = this.joinRequestTimes.get(peerId) ?? [];
-
-		// Remove timestamps outside the window
-		const recentTimes = times.filter((t) => now - t < JOIN_REQUEST_WINDOW_MS);
-		this.joinRequestTimes.set(peerId, recentTimes);
-
-		return recentTimes.length >= JOIN_REQUEST_LIMIT;
-	}
-
-	/**
-	 * Record a join request for rate limiting.
-	 */
-	private recordJoinRequest(peerId: string): void {
-		const times = this.joinRequestTimes.get(peerId) ?? [];
-		times.push(Date.now());
-		this.joinRequestTimes.set(peerId, times);
-	}
-
-	/**
-	 * Clean up stale rate limit entries to prevent memory growth.
-	 */
-	private cleanupRateLimitEntries(): void {
-		const now = Date.now();
-		for (const [peerId, times] of this.joinRequestTimes) {
-			const recentTimes = times.filter((t) => now - t < JOIN_REQUEST_WINDOW_MS);
-			if (recentTimes.length === 0) {
-				this.joinRequestTimes.delete(peerId);
-			} else {
-				this.joinRequestTimes.set(peerId, recentTimes);
-			}
-		}
-	}
-
-	/**
 	 * Handle join request (host only).
 	 */
 	private handleJoinRequest(
@@ -1112,7 +1073,7 @@ export class Session {
 		const playerId = message.playerId;
 
 		// Check rate limiting
-		if (this.isJoinRateLimited(peerId)) {
+		if (this.joinRateLimiter.checkAndRecord(peerId)) {
 			const rejectMsg: Message = {
 				type: MessageType.JoinReject,
 				playerId,
@@ -1122,11 +1083,8 @@ export class Session {
 			return;
 		}
 
-		// Record this join request
-		this.recordJoinRequest(peerId);
-
 		// Check if room is full
-		if (this._players.size >= this.config.maxPlayers) {
+		if (this.playerManager.size >= this.config.maxPlayers) {
 			const rejectMsg: Message = {
 				type: MessageType.JoinReject,
 				playerId,
@@ -1145,7 +1103,7 @@ export class Session {
 				tickRate: this.config.tickRate,
 				maxPlayers: this.config.maxPlayers,
 			},
-			players: Array.from(this._players.keys()),
+			players: this.playerManager.getPlayerIds(),
 		};
 		this.sendToPeer(peerId, acceptMsg, true);
 
@@ -1160,7 +1118,7 @@ export class Session {
 			isHost: false,
 			role: playerRole,
 		};
-		this._players.set(playerId, playerInfo);
+		this.playerManager.addPlayer(playerInfo);
 
 		// Only add players to the engine (spectators don't contribute inputs)
 		if (
@@ -1195,8 +1153,8 @@ export class Session {
 
 		// Add existing players
 		for (const playerId of message.players) {
-			if (!this._players.has(playerId)) {
-				this._players.set(playerId, {
+			if (!this.playerManager.hasPlayer(playerId)) {
+				this.playerManager.addPlayer({
 					id: playerId,
 					connectionState: PlayerConnectionState.Connected,
 					joinTick: null,
@@ -1236,7 +1194,7 @@ export class Session {
 			isHost: false,
 			role: message.role,
 		};
-		this._players.set(message.playerId, playerInfo);
+		this.playerManager.addPlayer(playerInfo);
 		// Only add players to the engine (spectators don't contribute inputs)
 		if (message.role === PlayerRole.Player) {
 			this.engine.addPlayer(message.playerId, message.joinTick);
@@ -1250,7 +1208,7 @@ export class Session {
 	private handlePlayerLeft(
 		message: Message & { type: MessageType.PlayerLeft },
 	): void {
-		const player = this._players.get(message.playerId);
+		const player = this.playerManager.getPlayer(message.playerId);
 		if (player) {
 			player.leaveTick = message.leaveTick;
 			player.connectionState = PlayerConnectionState.Disconnected;
@@ -1372,10 +1330,7 @@ export class Session {
 			};
 
 			// Host-authority in mesh: guests send to host only, host collects
-			if (
-				this.config.topology === Topology.Mesh &&
-				this.config.desyncAuthority === DesyncAuthority.Host
-			) {
+			if (this.desyncManager.isHostAuthority) {
 				if (this._isHost) {
 					// Host records own hash and checks for desync
 					this.recordHashAndCheckDesync(currentTick, this.localPlayerId, hash);
@@ -1400,66 +1355,40 @@ export class Session {
 	): void {
 		if (!this._isHost) return;
 
-		// Get or create tick entry
-		let tickHashes = this.receivedHashes.get(tick);
-		if (!tickHashes) {
-			tickHashes = new Map();
-			this.receivedHashes.set(tick, tickHashes);
-		}
-		tickHashes.set(playerId, hash);
+		// Record the hash
+		this.desyncManager.recordHash(tick, playerId, hash);
 
 		// Check if we have hashes from all active players
-		const activePlayers = Array.from(this._players.values()).filter(
-			(p) =>
-				p.role === PlayerRole.Player &&
-				p.connectionState === PlayerConnectionState.Connected,
-		);
-		if (tickHashes.size < activePlayers.length) {
+		const activePlayers = this.playerManager.getActivePlayers();
+		if (!this.desyncManager.hasAllHashes(tick, activePlayers.length)) {
 			return; // Still waiting for more hashes
 		}
 
-		// Compare all hashes against host's hash
-		const hostHash = tickHashes.get(this.localPlayerId);
-		if (hostHash === undefined) return;
+		// Check for desyncs
+		const desyncs = this.desyncManager.checkDesyncs(tick, this.localPlayerId);
+		for (const desync of desyncs) {
+			this.debug.warn("Desync detected by host", {
+				tick: desync.tick,
+				playerId: desync.desyncedPlayerId,
+				hostHash: desync.referenceHash,
+				playerHash: desync.playerHash,
+			});
+			this.emit("desync", desync.tick, desync.referenceHash, desync.playerHash);
 
-		for (const [pid, playerHash] of tickHashes) {
-			if (pid === this.localPlayerId) continue;
-			if (playerHash !== hostHash) {
-				this.debug.warn("Desync detected by host", {
-					tick,
-					playerId: pid,
-					hostHash,
-					playerHash,
-				});
-				this.emit("desync", tick, hostHash, playerHash);
-
-				// Send authoritative state to desynced player
-				const state = this.engine.getState();
-				const syncMsg: Message = {
-					type: MessageType.Sync,
-					tick: state.tick,
-					state: state.state,
-					hash: this.engine.getCurrentHash(),
-					playerTimeline: state.playerTimeline,
-				};
-				this.sendToPeer(pid, syncMsg, true);
-			}
+			// Send authoritative state to desynced player
+			const state = this.engine.getState();
+			const syncMsg: Message = {
+				type: MessageType.Sync,
+				tick: state.tick,
+				state: state.state,
+				hash: this.engine.getCurrentHash(),
+				playerTimeline: state.playerTimeline,
+			};
+			this.sendToPeer(desync.desyncedPlayerId, syncMsg, true);
 		}
 
 		// Cleanup old tick entries
-		this.pruneReceivedHashes(tick);
-	}
-
-	/**
-	 * Remove old hash entries to prevent memory growth.
-	 */
-	private pruneReceivedHashes(currentTick: Tick): void {
-		const pruneBelow = asTick(currentTick - this.config.hashInterval * 2);
-		for (const tick of this.receivedHashes.keys()) {
-			if (tick < pruneBelow) {
-				this.receivedHashes.delete(tick);
-			}
-		}
+		this.desyncManager.pruneOldHashes(tick);
 	}
 
 	/**
@@ -1487,11 +1416,10 @@ export class Session {
 	 */
 	private sendToHost(message: Message): void {
 		// Find the host player
-		for (const player of this._players.values()) {
-			if (player.isHost && player.id !== this.localPlayerId) {
-				this.sendToPeer(player.id, message, isReliableMessage(message));
-				return;
-			}
+		const host = this.playerManager.findHost();
+		if (host && host.id !== this.localPlayerId) {
+			this.sendToPeer(host.id, message, isReliableMessage(message));
+			return;
 		}
 
 		// If we can't find the host by player info, send to first connected peer

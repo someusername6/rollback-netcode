@@ -1,6 +1,6 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
-import { LocalTransport, createLocalTransportGroup } from "./local.js";
+import { LocalTransport, createLocalTransportGroup } from "../../src/transport/local.js";
 
 describe("LocalTransport", () => {
 	describe("basic messaging", () => {

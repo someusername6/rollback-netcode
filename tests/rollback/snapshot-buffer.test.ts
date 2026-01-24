@@ -1,7 +1,7 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
-import { asTick } from "../types.js";
-import { SnapshotBuffer } from "./snapshot-buffer.js";
+import { asTick } from "../../src/types.js";
+import { SnapshotBuffer } from "../../src/rollback/snapshot-buffer.js";
 
 describe("SnapshotBuffer", () => {
 	describe("constructor", () => {
