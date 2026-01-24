@@ -114,6 +114,12 @@ interface PeerConnection {
 
 	/** Connection timeout timer */
 	connectionTimer: ReturnType<typeof setTimeout> | null;
+
+	/** Disconnect detection timer (waits before declaring disconnect) */
+	disconnectTimer: ReturnType<typeof setTimeout> | null;
+
+	/** Reconnection attempt timer */
+	reconnectTimer: ReturnType<typeof setTimeout> | null;
 }
 
 /**
@@ -480,6 +486,8 @@ export class WebRTCTransport implements TransportAdapter {
 			connectionResolve: null,
 			connectionReject: null,
 			connectionTimer: null,
+			disconnectTimer: null,
+			reconnectTimer: null,
 		};
 
 		this.setupPeerConnection(peerId, peer);
@@ -509,7 +517,12 @@ export class WebRTCTransport implements TransportAdapter {
 				this.handleConnectionFailure(peerId, peer);
 			} else if (state === "disconnected") {
 				// Might recover, wait a bit before declaring disconnection
-				setTimeout(() => {
+				// Clear any existing disconnect timer
+				if (peer.disconnectTimer) {
+					clearTimeout(peer.disconnectTimer);
+				}
+				peer.disconnectTimer = setTimeout(() => {
+					peer.disconnectTimer = null;
 					if (connection.iceConnectionState === "disconnected") {
 						this.handleConnectionFailure(peerId, peer);
 					}
@@ -630,7 +643,12 @@ export class WebRTCTransport implements TransportAdapter {
 		) {
 			peer.reconnectAttempts++;
 			const delay = this.getReconnectDelayWithJitter(peer.reconnectAttempts);
-			setTimeout(() => {
+			// Clear any existing reconnect timer
+			if (peer.reconnectTimer) {
+				clearTimeout(peer.reconnectTimer);
+			}
+			peer.reconnectTimer = setTimeout(() => {
+				peer.reconnectTimer = null;
 				this.attemptReconnect(peerId);
 			}, delay);
 		} else {
@@ -696,10 +714,18 @@ export class WebRTCTransport implements TransportAdapter {
 	private cleanupPeer(peerId: string, peer: PeerConnection): void {
 		const wasConnected = peer.isConnected;
 
-		// Clear connection timeout
+		// Clear all pending timers
 		if (peer.connectionTimer) {
 			clearTimeout(peer.connectionTimer);
 			peer.connectionTimer = null;
+		}
+		if (peer.disconnectTimer) {
+			clearTimeout(peer.disconnectTimer);
+			peer.disconnectTimer = null;
+		}
+		if (peer.reconnectTimer) {
+			clearTimeout(peer.reconnectTimer);
+			peer.reconnectTimer = null;
 		}
 
 		peer.reliableChannel?.close();

@@ -304,18 +304,45 @@ describe("InputBuffer", () => {
 			assert.strictEqual(buffer.getLastConfirmedInput(p1), undefined);
 		});
 
-		it("should return the most recent received input", () => {
+		it("should return input at confirmedTick, not highest received tick", () => {
 			const buffer = new InputBuffer();
 			const p1 = asPlayerId("player-1");
 			buffer.addPlayer(p1, asTick(0));
 
+			// Receive inputs with gaps: 0, 1 (consecutive), then skip to 5
 			buffer.receiveInput(p1, asTick(0), new Uint8Array([0]));
-			buffer.receiveInput(p1, asTick(5), new Uint8Array([5]));
-			buffer.receiveInput(p1, asTick(3), new Uint8Array([3]));
+			buffer.receiveInput(p1, asTick(1), new Uint8Array([1]));
+			buffer.receiveInput(p1, asTick(5), new Uint8Array([5])); // Gap at 2, 3, 4
+
+			// confirmedTick should be 1 (highest consecutive)
+			assert.strictEqual(buffer.getConfirmedTick(p1), 1);
+
+			// getLastConfirmedInput should return input at tick 1, NOT tick 5
+			const last = buffer.getLastConfirmedInput(p1);
+			assert.ok(last);
+			assert.deepStrictEqual(
+				last,
+				new Uint8Array([1]),
+				"Should return confirmed input at tick 1, not unconfirmed input at tick 5",
+			);
+		});
+
+		it("should return last consecutive input when all inputs are confirmed", () => {
+			const buffer = new InputBuffer();
+			const p1 = asPlayerId("player-1");
+			buffer.addPlayer(p1, asTick(0));
+
+			// Receive consecutive inputs
+			buffer.receiveInput(p1, asTick(0), new Uint8Array([0]));
+			buffer.receiveInput(p1, asTick(1), new Uint8Array([1]));
+			buffer.receiveInput(p1, asTick(2), new Uint8Array([2]));
+
+			// confirmedTick should be 2
+			assert.strictEqual(buffer.getConfirmedTick(p1), 2);
 
 			const last = buffer.getLastConfirmedInput(p1);
 			assert.ok(last);
-			assert.deepStrictEqual(last, new Uint8Array([5]));
+			assert.deepStrictEqual(last, new Uint8Array([2]));
 		});
 	});
 

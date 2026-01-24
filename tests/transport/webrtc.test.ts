@@ -261,6 +261,174 @@ describe("WebRTCTransport", () => {
 			assert.strictEqual(transport.getConnectionMetrics("peer1"), null);
 			assert.strictEqual(transport.getConnectionMetrics("peer2"), null);
 		});
+
+		it("should not fire disconnect callback after destroy with pending disconnect timer", async () => {
+			const transport = new WebRTCTransport("local", { keepaliveInterval: 0 });
+			transport.setSignalingCallbacks({
+				onLocalDescription: () => {},
+				onLocalCandidate: () => {},
+			});
+
+			let disconnectCalledAfterDestroy = false;
+			let destroyed = false;
+
+			transport.onDisconnect = () => {
+				if (destroyed) {
+					disconnectCalledAfterDestroy = true;
+				}
+			};
+
+			// Start connection
+			const connectPromise = transport.connect("peer1").catch(() => {});
+
+			// Wait for peer to be created
+			await new Promise(resolve => setTimeout(resolve, 10));
+
+			// Get the mock peer connection to simulate ICE state change
+			// Access internal peers map
+			const peers = (transport as unknown as { peers: Map<string, { connection: MockRTCPeerConnection }> }).peers;
+			const peer = peers.get("peer1");
+			assert.ok(peer, "Peer should exist");
+
+			// Simulate ICE disconnected state - this schedules a disconnect timer
+			peer.connection.simulateIceConnectionState("disconnected");
+
+			// Destroy immediately before the disconnect timer fires
+			destroyed = true;
+			transport.destroy();
+			await connectPromise;
+
+			// Wait for the disconnect detection delay to have passed
+			await new Promise(resolve => setTimeout(resolve, 150));
+
+			// Disconnect callback should NOT have been called after destroy
+			assert.strictEqual(
+				disconnectCalledAfterDestroy,
+				false,
+				"onDisconnect should not be called after destroy",
+			);
+		});
+
+		it("should not attempt reconnection after destroy", async () => {
+			const transport = new WebRTCTransport("local", {
+				keepaliveInterval: 0,
+				reconnectDelay: 50, // Fast reconnection for testing
+			});
+			transport.setSignalingCallbacks({
+				onLocalDescription: () => {},
+				onLocalCandidate: () => {},
+			});
+
+			let reconnectAttempts = 0;
+			const originalOnLocalDescription = transport["signalingCallbacks"]?.onLocalDescription;
+
+			// Track reconnection attempts through offer creation
+			transport.setSignalingCallbacks({
+				onLocalDescription: (peerId, desc) => {
+					reconnectAttempts++;
+					originalOnLocalDescription?.(peerId, desc);
+				},
+				onLocalCandidate: () => {},
+			});
+
+			// Start connection
+			const connectPromise = transport.connect("peer1").catch(() => {});
+
+			// Wait for initial connection attempt
+			await new Promise(resolve => setTimeout(resolve, 10));
+			const initialAttempts = reconnectAttempts;
+
+			// Destroy before any reconnection timers can fire
+			transport.destroy();
+			await connectPromise;
+
+			// Wait for any pending reconnect timers
+			await new Promise(resolve => setTimeout(resolve, 200));
+
+			// No additional reconnection attempts should have occurred
+			assert.strictEqual(
+				reconnectAttempts,
+				initialAttempts,
+				"No reconnection attempts should occur after destroy",
+			);
+		});
+	});
+
+	describe("error handling", () => {
+		it("should handle send errors gracefully without throwing", async () => {
+			const transport = new WebRTCTransport("local", { keepaliveInterval: 0 });
+			transport.setSignalingCallbacks({
+				onLocalDescription: () => {},
+				onLocalCandidate: () => {},
+			});
+
+			// Sending to non-existent peer should not throw
+			assert.doesNotThrow(() => {
+				transport.send("nonexistent", new Uint8Array([1, 2, 3]), true);
+			});
+
+			transport.destroy();
+		});
+
+		it("should handle ICE candidate errors gracefully", async () => {
+			const transport = new WebRTCTransport("local", { keepaliveInterval: 0 });
+			transport.setSignalingCallbacks({
+				onLocalDescription: () => {},
+				onLocalCandidate: () => {},
+			});
+
+			// Adding ICE candidate for non-existent peer should not throw
+			await assert.doesNotReject(async () => {
+				await transport.handleRemoteCandidate("nonexistent", {
+					candidate: "invalid",
+					sdpMid: "0",
+					sdpMLineIndex: 0,
+				});
+			});
+
+			transport.destroy();
+		});
+
+		it("should notify via onDisconnect when connection fails", async () => {
+			const transport = new WebRTCTransport("local", { keepaliveInterval: 0 });
+			transport.setSignalingCallbacks({
+				onLocalDescription: () => {},
+				onLocalCandidate: () => {},
+			});
+
+			// The disconnect callback is the proper way to handle connection failures
+			// Silent console.warn calls are for debugging, not error propagation
+			let disconnectedPeerId: string | null = null;
+			transport.onDisconnect = (peerId) => {
+				disconnectedPeerId = peerId;
+			};
+
+			// Start connection
+			const connectPromise = transport.connect("peer1").catch(() => {});
+			await new Promise(resolve => setTimeout(resolve, 10));
+
+			// Get mock peer and simulate failure
+			const peers = (transport as unknown as { peers: Map<string, { connection: MockRTCPeerConnection; isConnected: boolean }> }).peers;
+			const peer = peers.get("peer1");
+			assert.ok(peer, "Peer should exist");
+
+			// Mark as connected, then simulate failure
+			peer.isConnected = true;
+			peer.connection.simulateIceConnectionState("failed");
+
+			// Wait for failure handling
+			await new Promise(resolve => setTimeout(resolve, 50));
+			await connectPromise;
+
+			// Disconnect callback should have been invoked with the peer ID
+			assert.strictEqual(
+				disconnectedPeerId,
+				"peer1",
+				"onDisconnect should be called with the failed peer ID",
+			);
+
+			transport.destroy();
+		});
 	});
 });
 

@@ -325,16 +325,10 @@ export class InputBuffer {
 		const player = this.players.get(playerId);
 		if (!player) return undefined;
 
-		// Find the most recent received input
-		let lastTick: Tick | undefined;
-		for (const tick of player.received.keys()) {
-			if (lastTick === undefined || tick > lastTick) {
-				lastTick = tick;
-			}
-		}
-
-		if (lastTick !== undefined) {
-			return player.received.get(lastTick);
+		// Return input at confirmedTick, not just any received input
+		// confirmedTick is the highest consecutive tick with input
+		if (player.confirmedTick >= player.joinTick) {
+			return player.received.get(player.confirmedTick);
 		}
 
 		return undefined;
