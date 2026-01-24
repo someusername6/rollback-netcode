@@ -10,16 +10,22 @@ import type {
 } from "../transport/adapter.js";
 import {
 	DEFAULT_SESSION_CONFIG,
+	DesyncAuthority,
 	type ErrorContext,
+	ErrorSource,
 	type Game,
 	type InputPredictor,
+	PauseReason,
+	PlayerConnectionState,
 	type PlayerId,
 	type PlayerInfo,
+	PlayerRole,
 	type SessionConfig,
 	type SessionEvents,
-	type SessionState,
+	SessionState,
 	type Tick,
 	type TickResult,
+	Topology,
 	asPlayerId,
 	asTick,
 	validateSessionConfig,
@@ -30,17 +36,21 @@ import { decodeMessage, encodeMessage } from "../protocol/encoding.js";
 import {
 	type Message,
 	MessageType,
+	isDisconnectReportMessage,
+	isDropPlayerMessage,
 	isHashMessage,
 	isInputMessage,
 	isJoinAcceptMessage,
 	isJoinRejectMessage,
 	isJoinRequestMessage,
+	isLagReportMessage,
 	isPauseMessage,
 	isPingMessage,
 	isPlayerJoinedMessage,
 	isPlayerLeftMessage,
 	isPongMessage,
 	isReliableMessage,
+	isResumeCountdownMessage,
 	isResumeMessage,
 	isStateSyncMessage,
 	isSyncMessage,
@@ -63,6 +73,9 @@ const JOIN_REQUEST_WINDOW_MS = 10000;
 
 /** Interval for cleaning up stale rate limit entries (in milliseconds) */
 const RATE_LIMIT_CLEANUP_INTERVAL_MS = 60000;
+
+/** Minimum interval between lag reports for the same player (in ticks) */
+const LAG_REPORT_COOLDOWN_TICKS = 60;
 
 /**
  * Options for creating a session.
@@ -122,9 +135,10 @@ export class Session {
 	private readonly topologyStrategy: TopologyStrategy;
 	private readonly debug: DebugLogger;
 
-	private _state: SessionState = "disconnected";
+	private _state: SessionState = SessionState.Disconnected;
 	private _isHost = false;
 	private _roomId: string | null = null;
+	private _localRole: PlayerRole = PlayerRole.Player;
 	private readonly _players: Map<PlayerId, PlayerInfo> = new Map();
 	private lastHashBroadcastTick: Tick = asTick(-1);
 	private inputRedundancy = DEFAULT_INPUT_REDUNDANCY;
@@ -134,6 +148,12 @@ export class Session {
 
 	/** Timer for periodic rate limit cleanup */
 	private rateLimitCleanupTimer: ReturnType<typeof setInterval> | null = null;
+
+	/** Host-authority desync: hashes received from players, keyed by tick then playerId */
+	private readonly receivedHashes: Map<Tick, Map<PlayerId, number>> = new Map();
+
+	/** Last tick when a lag report was sent for each player (to avoid spam) */
+	private readonly lastLagReportTick: Map<PlayerId, Tick> = new Map();
 
 	/**
 	 * Create a new session.
@@ -170,10 +190,11 @@ export class Session {
 		// Initialize local player info
 		this._players.set(this._localPlayerId, {
 			id: this._localPlayerId,
-			connectionState: "connected",
+			connectionState: PlayerConnectionState.Connected,
 			joinTick: null,
 			leaveTick: null,
 			isHost: false,
+			role: PlayerRole.Player,
 		});
 
 		// Setup transport callbacks
@@ -233,6 +254,31 @@ export class Session {
 	 */
 	get roomId(): string | null {
 		return this._roomId;
+	}
+
+	/**
+	 * Local player's role in the session.
+	 */
+	get localRole(): PlayerRole {
+		return this._localRole;
+	}
+
+	/**
+	 * Set the local player's role.
+	 * Must be called before joining a room or starting the game.
+	 *
+	 * @param role - The role to set ('pilot' or 'spectator')
+	 * @throws Error if called while in a room
+	 */
+	setLocalRole(role: PlayerRole): void {
+		if (this._state !== SessionState.Disconnected) {
+			throw new Error("Cannot change role while in a room");
+		}
+		this._localRole = role;
+		const localPlayer = this._players.get(this.localPlayerId);
+		if (localPlayer) {
+			localPlayer.role = role;
+		}
 	}
 
 	/**
@@ -300,7 +346,7 @@ export class Session {
 	 * @returns The room ID
 	 */
 	async createRoom(): Promise<string> {
-		if (this._state !== "disconnected") {
+		if (this._state !== SessionState.Disconnected) {
 			throw new Error("Already in a room or connecting");
 		}
 
@@ -314,7 +360,7 @@ export class Session {
 			localPlayer.joinTick = asTick(0);
 		}
 
-		this.setState("lobby");
+		this.setState(SessionState.Lobby);
 		return this._roomId;
 	}
 
@@ -325,21 +371,22 @@ export class Session {
 	 * @param hostPeerId - The host's peer ID
 	 */
 	async joinRoom(roomId: string, hostPeerId: string): Promise<void> {
-		if (this._state !== "disconnected") {
+		if (this._state !== SessionState.Disconnected) {
 			throw new Error("Already in a room or connecting");
 		}
 
 		this._roomId = roomId;
 		this._isHost = false;
-		this.setState("connecting");
+		this.setState(SessionState.Connecting);
 
 		// Connect to host
 		await this.transport.connect(hostPeerId);
 
-		// Send join request
+		// Send join request with role
 		const joinRequest: Message = {
 			type: MessageType.JoinRequest,
 			playerId: this.localPlayerId,
+			role: this._localRole,
 		};
 		this.sendToHost(joinRequest);
 	}
@@ -348,12 +395,12 @@ export class Session {
 	 * Leave the current room.
 	 */
 	leaveRoom(): void {
-		if (this._state === "disconnected") {
+		if (this._state === SessionState.Disconnected) {
 			return;
 		}
 
 		// Notify other players
-		if (this._state === "playing") {
+		if (this._state === SessionState.Playing) {
 			const leaveMsg: Message = {
 				type: MessageType.PlayerLeft,
 				playerId: this.localPlayerId,
@@ -374,13 +421,14 @@ export class Session {
 		// Re-add local player
 		this._players.set(this.localPlayerId, {
 			id: this.localPlayerId,
-			connectionState: "connected",
+			connectionState: PlayerConnectionState.Connected,
 			joinTick: null,
 			leaveTick: null,
 			isHost: false,
+			role: PlayerRole.Player,
 		});
 
-		this.setState("disconnected");
+		this.setState(SessionState.Disconnected);
 	}
 
 	/**
@@ -391,15 +439,18 @@ export class Session {
 		if (!this._isHost) {
 			throw new Error("Only the host can start the game");
 		}
-		if (this._state !== "lobby") {
+		if (this._state !== SessionState.Lobby) {
 			throw new Error("Can only start from lobby state");
 		}
 
-		// Set join ticks for all players
+		// Set join ticks for all players, but only add players to engine
 		const startTick = asTick(0);
 		for (const player of this._players.values()) {
 			player.joinTick = startTick;
-			this.engine.addPlayer(player.id, startTick);
+			// Only players contribute inputs - spectators run simulation but don't send inputs
+			if (player.role === PlayerRole.Player) {
+				this.engine.addPlayer(player.id, startTick);
+			}
 		}
 
 		// Send state sync to all players
@@ -413,18 +464,18 @@ export class Session {
 		};
 		this.broadcast(syncMsg, true);
 
-		this.setState("playing");
+		this.setState(SessionState.Playing);
 		this.emit("gameStart");
 	}
 
 	/**
 	 * Pause the game (host only).
 	 */
-	pause(): void {
+	pause(reason: PauseReason = PauseReason.PlayerRequest): void {
 		if (!this._isHost) {
 			throw new Error("Only the host can pause");
 		}
-		if (this._state !== "playing") {
+		if (this._state !== SessionState.Playing) {
 			return;
 		}
 
@@ -432,10 +483,11 @@ export class Session {
 			type: MessageType.Pause,
 			playerId: this.localPlayerId,
 			pauseTick: this.engine.currentTick,
+			reason,
 		};
 		this.broadcast(pauseMsg, true);
 
-		this.setState("paused");
+		this.setState(SessionState.Paused);
 	}
 
 	/**
@@ -445,7 +497,7 @@ export class Session {
 		if (!this._isHost) {
 			throw new Error("Only the host can resume");
 		}
-		if (this._state !== "paused") {
+		if (this._state !== SessionState.Paused) {
 			return;
 		}
 
@@ -456,18 +508,73 @@ export class Session {
 		};
 		this.broadcast(resumeMsg, true);
 
-		this.setState("playing");
+		this.setState(SessionState.Playing);
+	}
+
+	/**
+	 * Send a resume countdown to all players (host only).
+	 * Use this before calling resume() to give players time to prepare.
+	 *
+	 * @param secondsRemaining - Number of seconds until resume
+	 */
+	sendResumeCountdown(secondsRemaining: number): void {
+		if (!this._isHost) {
+			throw new Error("Only the host can send resume countdown");
+		}
+		if (this._state !== SessionState.Paused) {
+			return;
+		}
+
+		const countdownMsg: Message = {
+			type: MessageType.ResumeCountdown,
+			secondsRemaining,
+		};
+		this.broadcast(countdownMsg, true);
+
+		// Also emit locally so host's game layer can react
+		this.emit("resumeCountdown", secondsRemaining);
+	}
+
+	/**
+	 * Drop a player from the game (host only).
+	 * Use this to remove a disconnected or lagging player and allow the game to continue.
+	 *
+	 * @param playerId - The player to drop
+	 * @param metadata - Optional metadata (e.g., AI replacement info)
+	 */
+	dropPlayer(playerId: PlayerId, metadata?: Uint8Array): void {
+		if (!this._isHost) {
+			throw new Error("Only the host can drop players");
+		}
+
+		const player = this._players.get(playerId);
+		if (!player) {
+			return;
+		}
+
+		// Mark player as disconnected locally
+		this.markPlayerDisconnected(playerId);
+
+		// Broadcast DropPlayer to all other players
+		const dropMsg: Message =
+			metadata !== undefined
+				? { type: MessageType.DropPlayer, playerId, metadata }
+				: { type: MessageType.DropPlayer, playerId };
+		this.broadcast(dropMsg, true);
+
+		// Emit locally
+		this.emit("playerDropped", playerId, metadata);
 	}
 
 	/**
 	 * Advance the simulation by one tick.
 	 * Call this at your game's tick rate (e.g., 60 times per second).
 	 *
-	 * @param localInput - The local player's input for this tick
+	 * @param localInput - The local player's input for this tick (required for pilots, ignored for spectators)
 	 * @returns Tick result with rollback info
 	 */
-	tick(localInput: Uint8Array): TickResult {
-		if (this._state !== "playing") {
+	tick(localInput?: Uint8Array): TickResult {
+		if (this._state !== SessionState.Playing) {
 			return {
 				tick: this.engine.currentTick,
 				rolledBack: false,
@@ -476,13 +583,19 @@ export class Session {
 
 		const currentTick = this.engine.currentTick;
 
-		// Set local input
-		this.engine.setLocalInput(currentTick, localInput);
+		// Only players send inputs
+		if (this._localRole === PlayerRole.Player) {
+			if (!localInput) {
+				throw new Error("Players must provide input");
+			}
+			// Set local input
+			this.engine.setLocalInput(currentTick, localInput);
 
-		// Broadcast local input to all peers
-		this.broadcastInput(currentTick, localInput);
+			// Broadcast local input to all peers
+			this.broadcastInput(currentTick, localInput);
+		}
 
-		// Run the engine tick
+		// Run the engine tick (both pilots and spectators run simulation)
 		const result = this.engine.tick();
 
 		// Log rollback if it occurred
@@ -495,6 +608,9 @@ export class Session {
 
 		// Periodic hash broadcast for desync detection
 		this.maybeBroadcastHash();
+
+		// Periodic lag check and report (guests only, in host-authority mode)
+		this.checkAndReportLag();
 
 		return result;
 	}
@@ -556,7 +672,7 @@ export class Session {
 								? handlerError
 								: new Error(String(handlerError)),
 							{
-								source: "session",
+								source: ErrorSource.Session,
 								recoverable: true,
 								details: { event },
 							},
@@ -602,7 +718,7 @@ export class Session {
 			this.emitError(
 				error instanceof Error ? error : new Error(String(error)),
 				{
-					source: "protocol",
+					source: ErrorSource.Protocol,
 					recoverable: true,
 					details: { peerId, dataLength: data.length },
 				},
@@ -636,6 +752,14 @@ export class Session {
 			this.handlePing(peerId, message);
 		} else if (isPongMessage(message)) {
 			this.handlePong(peerId, message);
+		} else if (isDisconnectReportMessage(message)) {
+			this.handleDisconnectReport(message);
+		} else if (isLagReportMessage(message)) {
+			this.handleLagReport(message);
+		} else if (isResumeCountdownMessage(message)) {
+			this.handleResumeCountdown(message);
+		} else if (isDropPlayerMessage(message)) {
+			this.handleDropPlayer(message);
 		}
 	}
 
@@ -649,7 +773,7 @@ export class Session {
 		const playerId = asPlayerId(peerId);
 		const player = this._players.get(playerId);
 		if (player) {
-			player.connectionState = "connected";
+			player.connectionState = PlayerConnectionState.Connected;
 		}
 	}
 
@@ -660,17 +784,150 @@ export class Session {
 		this.debug.log("Peer disconnected", { peerId });
 
 		const playerId = asPlayerId(peerId);
+
+		// In mesh + host-authority mode, guests report to host instead of handling locally
+		if (
+			this.config.topology === Topology.Mesh &&
+			this.config.desyncAuthority === DesyncAuthority.Host
+		) {
+			if (!this._isHost) {
+				// Guest: report to host, don't handle locally yet
+				const report: Message = {
+					type: MessageType.DisconnectReport,
+					disconnectedPeerId: playerId,
+				};
+				this.sendToHost(report);
+				return;
+			}
+			// Host falls through to handle directly
+		}
+
+		// Host or star topology or peer mode: handle directly
+		this.markPlayerDisconnected(playerId);
+	}
+
+	/**
+	 * Mark a player as disconnected and handle cleanup.
+	 */
+	private markPlayerDisconnected(playerId: PlayerId): void {
 		const player = this._players.get(playerId);
+		if (!player) return;
 
-		if (player) {
-			player.connectionState = "disconnected";
+		player.connectionState = PlayerConnectionState.Disconnected;
 
-			if (this._state === "playing") {
-				player.leaveTick = this.engine.currentTick;
+		if (this._state === SessionState.Playing) {
+			player.leaveTick = this.engine.currentTick;
+			// Only remove players from engine (spectators were never added)
+			if (player.role === PlayerRole.Player) {
 				this.engine.removePlayer(playerId, player.leaveTick);
-				this.emit("playerLeft", player);
+			}
+			this.emit("playerLeft", player);
+
+			// If host in host-authority mode, broadcast PlayerLeft to all
+			if (
+				this._isHost &&
+				this.config.topology === Topology.Mesh &&
+				this.config.desyncAuthority === DesyncAuthority.Host
+			) {
+				const leaveMsg: Message = {
+					type: MessageType.PlayerLeft,
+					playerId,
+					leaveTick: player.leaveTick,
+				};
+				this.broadcast(leaveMsg, true);
 			}
 		}
+	}
+
+	/**
+	 * Handle disconnect report from a guest (host only, mesh+host-authority mode).
+	 */
+	private handleDisconnectReport(
+		message: Message & { type: MessageType.DisconnectReport },
+	): void {
+		if (!this._isHost) return;
+		this.debug.log("Received disconnect report", {
+			disconnectedPeerId: message.disconnectedPeerId,
+		});
+		this.markPlayerDisconnected(message.disconnectedPeerId);
+	}
+
+	/**
+	 * Handle lag report from a guest (host only).
+	 */
+	private handleLagReport(
+		message: Message & { type: MessageType.LagReport },
+	): void {
+		if (!this._isHost) return;
+		// Emit event for game layer to handle (pause decision, kick UI, etc.)
+		this.emit("lagReport", message.laggyPlayerId, message.ticksBehind);
+	}
+
+	/**
+	 * Check for lagging players and report to host (guests only, when lag threshold is set).
+	 */
+	private checkAndReportLag(): void {
+		// Only guests report lag in host-authority mode
+		if (this._isHost) return;
+		if (this.config.lagReportThreshold <= 0) return;
+
+		const currentTick = this.engine.currentTick;
+
+		// Check each remote player's confirmed tick
+		for (const player of this._players.values()) {
+			if (player.id === this.localPlayerId) continue;
+			if (player.role !== PlayerRole.Player) continue;
+			if (player.connectionState !== PlayerConnectionState.Connected) continue;
+
+			const confirmedTick = this.engine.getConfirmedTickForPlayer(player.id);
+			if (confirmedTick === undefined) continue;
+
+			const ticksBehind = currentTick - confirmedTick;
+
+			if (ticksBehind >= this.config.lagReportThreshold) {
+				// Check cooldown to avoid spamming
+				const lastReport = this.lastLagReportTick.get(player.id);
+				if (
+					lastReport !== undefined &&
+					currentTick - lastReport < LAG_REPORT_COOLDOWN_TICKS
+				) {
+					continue;
+				}
+
+				// Send lag report to host
+				const lagReport: Message = {
+					type: MessageType.LagReport,
+					laggyPlayerId: player.id,
+					ticksBehind,
+				};
+				this.sendToHost(lagReport);
+				this.lastLagReportTick.set(player.id, currentTick);
+
+				this.debug.log("Sent lag report", {
+					laggyPlayerId: player.id,
+					ticksBehind,
+				});
+			}
+		}
+	}
+
+	/**
+	 * Handle resume countdown message.
+	 */
+	private handleResumeCountdown(
+		message: Message & { type: MessageType.ResumeCountdown },
+	): void {
+		this.emit("resumeCountdown", message.secondsRemaining);
+	}
+
+	/**
+	 * Handle drop player message.
+	 */
+	private handleDropPlayer(
+		message: Message & { type: MessageType.DropPlayer },
+	): void {
+		this.markPlayerDisconnected(message.playerId);
+		this.emit("playerDropped", message.playerId, message.metadata);
 	}
 
 	/**
@@ -715,6 +972,23 @@ export class Session {
 	private handleHashMessage(
 		message: Message & { type: MessageType.Hash },
 	): void {
+		// Host-authority mode: host collects and compares
+		if (
+			this.config.topology === Topology.Mesh &&
+			this.config.desyncAuthority === DesyncAuthority.Host
+		) {
+			if (this._isHost) {
+				this.recordHashAndCheckDesync(
+					message.tick,
+					message.playerId,
+					message.hash,
+				);
+			}
+			// Guests don't compare hashes in host-authority mode
+			return;
+		}
+
+		// Peer mode: existing comparison logic
 		const localHash = this.engine.getHash(message.tick);
 
 		if (localHash !== undefined && localHash !== message.hash) {
@@ -749,16 +1023,20 @@ export class Session {
 			if (!this._players.has(entry.playerId)) {
 				this._players.set(entry.playerId, {
 					id: entry.playerId,
-					connectionState: "connected",
+					connectionState: PlayerConnectionState.Connected,
 					joinTick: entry.joinTick,
 					leaveTick: entry.leaveTick,
 					isHost: false,
+					role: PlayerRole.Player, // Default to player; role info may come from elsewhere
 				});
 			}
 		}
 
-		if (this._state === "connecting" || this._state === "lobby") {
-			this.setState("playing");
+		if (
+			this._state === SessionState.Connecting ||
+			this._state === SessionState.Lobby
+		) {
+			this.setState(SessionState.Playing);
 			this.emit("gameStart");
 		}
 	}
@@ -872,25 +1150,34 @@ export class Session {
 		this.sendToPeer(peerId, acceptMsg, true);
 
 		// Add player
+		const playerRole: PlayerRole = message.role ?? PlayerRole.Player;
 		const playerInfo: PlayerInfo = {
 			id: playerId,
-			connectionState: "connected",
-			joinTick: this._state === "playing" ? this.engine.currentTick : null,
+			connectionState: PlayerConnectionState.Connected,
+			joinTick:
+				this._state === SessionState.Playing ? this.engine.currentTick : null,
 			leaveTick: null,
 			isHost: false,
+			role: playerRole,
 		};
 		this._players.set(playerId, playerInfo);
 
-		if (this._state === "playing" && playerInfo.joinTick !== null) {
+		// Only add players to the engine (spectators don't contribute inputs)
+		if (
+			this._state === SessionState.Playing &&
+			playerInfo.joinTick !== null &&
+			playerRole === PlayerRole.Player
+		) {
 			this.engine.addPlayer(playerId, playerInfo.joinTick);
 		}
 
 		// Notify other players
-		if (this._state === "playing" && playerInfo.joinTick !== null) {
+		if (this._state === SessionState.Playing && playerInfo.joinTick !== null) {
 			const joinedMsg: Message = {
 				type: MessageType.PlayerJoined,
 				playerId,
 				joinTick: playerInfo.joinTick,
+				role: playerRole,
 			};
 			this.broadcast(joinedMsg, true);
 		}
@@ -904,17 +1191,18 @@ export class Session {
 	private handleJoinAccept(
 		message: Message & { type: MessageType.JoinAccept },
 	): void {
-		this.setState("lobby");
+		this.setState(SessionState.Lobby);
 
 		// Add existing players
 		for (const playerId of message.players) {
 			if (!this._players.has(playerId)) {
 				this._players.set(playerId, {
 					id: playerId,
-					connectionState: "connected",
+					connectionState: PlayerConnectionState.Connected,
 					joinTick: null,
 					leaveTick: null,
 					isHost: playerId === message.players[0], // First player is host
+					role: PlayerRole.Player, // Default; actual role will come from PlayerJoined
 				});
 			}
 		}
@@ -926,9 +1214,9 @@ export class Session {
 	private handleJoinReject(
 		message: Message & { type: MessageType.JoinReject },
 	): void {
-		this.setState("disconnected");
+		this.setState(SessionState.Disconnected);
 		this.emitError(new Error(`Join rejected: ${message.reason}`), {
-			source: "session",
+			source: ErrorSource.Session,
 			recoverable: false,
 			details: { reason: message.reason, playerId: message.playerId },
 		});
@@ -942,13 +1230,17 @@ export class Session {
 	): void {
 		const playerInfo: PlayerInfo = {
 			id: message.playerId,
-			connectionState: "connected",
+			connectionState: PlayerConnectionState.Connected,
 			joinTick: message.joinTick,
 			leaveTick: null,
 			isHost: false,
+			role: message.role,
 		};
 		this._players.set(message.playerId, playerInfo);
-		this.engine.addPlayer(message.playerId, message.joinTick);
+		// Only add players to the engine (spectators don't contribute inputs)
+		if (message.role === PlayerRole.Player) {
+			this.engine.addPlayer(message.playerId, message.joinTick);
+		}
 		this.emit("playerJoined", playerInfo);
 	}
 
@@ -961,7 +1253,7 @@ export class Session {
 		const player = this._players.get(message.playerId);
 		if (player) {
 			player.leaveTick = message.leaveTick;
-			player.connectionState = "disconnected";
+			player.connectionState = PlayerConnectionState.Disconnected;
 			this.engine.removePlayer(message.playerId, message.leaveTick);
 			this.emit("playerLeft", player);
 		}
@@ -971,14 +1263,14 @@ export class Session {
 	 * Handle pause message.
 	 */
 	private handlePause(_message: Message & { type: MessageType.Pause }): void {
-		this.setState("paused");
+		this.setState(SessionState.Paused);
 	}
 
 	/**
 	 * Handle resume message.
 	 */
 	private handleResume(_message: Message & { type: MessageType.Resume }): void {
-		this.setState("playing");
+		this.setState(SessionState.Playing);
 	}
 
 	/**
@@ -1071,14 +1363,102 @@ export class Session {
 		if (currentTick - this.lastHashBroadcastTick >= this.config.hashInterval) {
 			this.lastHashBroadcastTick = currentTick;
 
+			const hash = this.engine.getCurrentHash();
 			const hashMsg: Message = {
 				type: MessageType.Hash,
 				playerId: this.localPlayerId,
 				tick: currentTick,
-				hash: this.engine.getCurrentHash(),
+				hash,
 			};
 
-			this.broadcast(hashMsg, true);
+			// Host-authority in mesh: guests send to host only, host collects
+			if (
+				this.config.topology === Topology.Mesh &&
+				this.config.desyncAuthority === DesyncAuthority.Host
+			) {
+				if (this._isHost) {
+					// Host records own hash and checks for desync
+					this.recordHashAndCheckDesync(currentTick, this.localPlayerId, hash);
+				} else {
+					// Guest sends hash to host only
+					this.sendToHost(hashMsg);
+				}
+			} else {
+				// Peer mode or star topology: broadcast to all
+				this.broadcast(hashMsg, true);
+			}
+		}
+	}
+
+	/**
+	 * Record a hash from a player and check for desync (host-authority mode).
+	 */
+	private recordHashAndCheckDesync(
+		tick: Tick,
+		playerId: PlayerId,
+		hash: number,
+	): void {
+		if (!this._isHost) return;
+
+		// Get or create tick entry
+		let tickHashes = this.receivedHashes.get(tick);
+		if (!tickHashes) {
+			tickHashes = new Map();
+			this.receivedHashes.set(tick, tickHashes);
+		}
+		tickHashes.set(playerId, hash);
+
+		// Check if we have hashes from all active players
+		const activePlayers = Array.from(this._players.values()).filter(
+			(p) =>
+				p.role === PlayerRole.Player &&
+				p.connectionState === PlayerConnectionState.Connected,
+		);
+		if (tickHashes.size < activePlayers.length) {
+			return; // Still waiting for more hashes
+		}
+
+		// Compare all hashes against host's hash
+		const hostHash = tickHashes.get(this.localPlayerId);
+		if (hostHash === undefined) return;
+
+		for (const [pid, playerHash] of tickHashes) {
+			if (pid === this.localPlayerId) continue;
+			if (playerHash !== hostHash) {
+				this.debug.warn("Desync detected by host", {
+					tick,
+					playerId: pid,
+					hostHash,
+					playerHash,
+				});
+				this.emit("desync", tick, hostHash, playerHash);
+
+				// Send authoritative state to desynced player
+				const state = this.engine.getState();
+				const syncMsg: Message = {
+					type: MessageType.Sync,
+					tick: state.tick,
+					state: state.state,
+					hash: this.engine.getCurrentHash(),
+					playerTimeline: state.playerTimeline,
+				};
+				this.sendToPeer(pid, syncMsg, true);
+			}
+		}
+
+		// Cleanup old tick entries
+		this.pruneReceivedHashes(tick);
+	}
+
+	/**
+	 * Remove old hash entries to prevent memory growth.
+	 */
+	private pruneReceivedHashes(currentTick: Tick): void {
+		const pruneBelow = asTick(currentTick - this.config.hashInterval * 2);
+		for (const tick of this.receivedHashes.keys()) {
+			if (tick < pruneBelow) {
+				this.receivedHashes.delete(tick);
+			}
 		}
 	}
 

@@ -6,7 +6,7 @@
  * - Mesh: Peers send directly to each other
  */
 
-import type { Topology as TopologyType } from "../types.js";
+import { Topology as TopologyType } from "../types.js";
 
 /**
  * Interface for topology implementations.
@@ -44,7 +44,7 @@ export interface TopologyStrategy {
  * - This reduces the number of connections but increases latency slightly
  */
 export class StarTopology implements TopologyStrategy {
-	readonly type: TopologyType = "star";
+	readonly type: TopologyType = TopologyType.Star;
 
 	shouldRelayInput(fromPeerId: string, isHost: boolean): boolean {
 		// Only the host relays inputs in star topology
@@ -72,7 +72,7 @@ export class StarTopology implements TopologyStrategy {
  * - Lower latency but more connections required
  */
 export class MeshTopology implements TopologyStrategy {
-	readonly type: TopologyType = "mesh";
+	readonly type: TopologyType = TopologyType.Mesh;
 
 	shouldRelayInput(_fromPeerId: string, _isHost: boolean): boolean {
 		// No relaying in mesh topology - peers communicate directly
@@ -98,9 +98,9 @@ export function createTopologyStrategy(
 	topology: TopologyType,
 ): TopologyStrategy {
 	switch (topology) {
-		case "star":
+		case TopologyType.Star:
 			return new StarTopology();
-		case "mesh":
+		case TopologyType.Mesh:
 			return new MeshTopology();
 		default: {
 			// TypeScript exhaustiveness check

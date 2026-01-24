@@ -2,7 +2,13 @@
  * Message type definitions for the rollback netcode protocol.
  */
 
-import type { PlayerId, PlayerTimeline, Tick } from "../types.js";
+import type {
+	PauseReason,
+	PlayerId,
+	PlayerRole,
+	PlayerTimeline,
+	Tick,
+} from "../types.js";
 
 // =============================================================================
 // Message Type Enum
@@ -24,6 +30,10 @@ export enum MessageType {
 	// Session control (reliable)
 	Pause = 0x20,
 	Resume = 0x21,
+	LagReport = 0x22,
+	DisconnectReport = 0x23,
+	ResumeCountdown = 0x24,
+	DropPlayer = 0x25,
 
 	// Room management (reliable)
 	JoinRequest = 0x30,
@@ -124,6 +134,8 @@ export interface PauseMessage {
 	playerId: PlayerId;
 	/** Tick at which to pause */
 	pauseTick: Tick;
+	/** Reason for the pause */
+	reason: PauseReason;
 }
 
 /**
@@ -148,6 +160,8 @@ export interface JoinRequestMessage {
 	type: MessageType.JoinRequest;
 	/** Player ID requesting to join */
 	playerId: PlayerId;
+	/** Requested role (defaults to 'pilot' if not specified) */
+	role?: PlayerRole;
 }
 
 /**
@@ -203,6 +217,8 @@ export interface PlayerJoinedMessage {
 	playerId: PlayerId;
 	/** Tick at which they joined */
 	joinTick: Tick;
+	/** Player's role */
+	role: PlayerRole;
 }
 
 /**
@@ -239,6 +255,55 @@ export interface PongMessage {
 }
 
 // =============================================================================
+// Lag and Disconnect Reports
+// =============================================================================
+
+/**
+ * Report that a player is lagging.
+ * Sent by peers to the host when they detect a player falling behind.
+ */
+export interface LagReportMessage {
+	type: MessageType.LagReport;
+	/** The player who is lagging */
+	laggyPlayerId: PlayerId;
+	/** How many ticks behind they are */
+	ticksBehind: number;
+}
+
+/**
+ * Report that a peer has disconnected.
+ * In mesh topology with host authority, guests send this to host
+ * instead of handling disconnects locally.
+ */
+export interface DisconnectReportMessage {
+	type: MessageType.DisconnectReport;
+	/** The peer that disconnected */
+	disconnectedPeerId: PlayerId;
+}
+
+/**
+ * Countdown before resuming the game.
+ * Sent by host to give players time to prepare.
+ */
+export interface ResumeCountdownMessage {
+	type: MessageType.ResumeCountdown;
+	/** Seconds remaining before resume */
+	secondsRemaining: number;
+}
+
+/**
+ * Drop a player and optionally replace with AI or transfer control.
+ * Sent by host to all players.
+ */
+export interface DropPlayerMessage {
+	type: MessageType.DropPlayer;
+	/** The player being dropped */
+	playerId: PlayerId;
+	/** Game-defined metadata (e.g., AI config, replacement info) */
+	metadata?: Uint8Array;
+}
+
+// =============================================================================
 // Union Type
 // =============================================================================
 
@@ -260,7 +325,11 @@ export type Message =
 	| PlayerJoinedMessage
 	| PlayerLeftMessage
 	| PingMessage
-	| PongMessage;
+	| PongMessage
+	| LagReportMessage
+	| DisconnectReportMessage
+	| ResumeCountdownMessage
+	| DropPlayerMessage;
 
 // =============================================================================
 // Type Guards
@@ -326,6 +395,26 @@ export function isPingMessage(msg: Message): msg is PingMessage {
 
 export function isPongMessage(msg: Message): msg is PongMessage {
 	return msg.type === MessageType.Pong;
+}
+
+export function isLagReportMessage(msg: Message): msg is LagReportMessage {
+	return msg.type === MessageType.LagReport;
+}
+
+export function isDisconnectReportMessage(
+	msg: Message,
+): msg is DisconnectReportMessage {
+	return msg.type === MessageType.DisconnectReport;
+}
+
+export function isResumeCountdownMessage(
+	msg: Message,
+): msg is ResumeCountdownMessage {
+	return msg.type === MessageType.ResumeCountdown;
+}
+
+export function isDropPlayerMessage(msg: Message): msg is DropPlayerMessage {
+	return msg.type === MessageType.DropPlayer;
 }
 
 // =============================================================================

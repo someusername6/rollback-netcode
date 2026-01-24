@@ -71,10 +71,42 @@ export interface Game<TInput = Uint8Array> {
 
 /**
  * Network topology for the session.
- * - 'mesh': All players connect to each other directly
- * - 'star': All players connect through a host
  */
-export type Topology = "mesh" | "star";
+export enum Topology {
+	/** All players connect to each other directly */
+	Mesh = 0,
+	/** All players connect through a host */
+	Star = 1,
+}
+
+/**
+ * Authority model for desync resolution.
+ */
+export enum DesyncAuthority {
+	/** Host is authoritative; guests send hashes to host only */
+	Host = 0,
+	/** Each peer compares independently */
+	Peer = 1,
+}
+
+/**
+ * Player role in the session.
+ */
+export enum PlayerRole {
+	/** Active player who sends inputs */
+	Player = 0,
+	/** Observer who runs simulation but doesn't send inputs */
+	Spectator = 1,
+}
+
+/**
+ * Reason for pausing the game.
+ */
+export enum PauseReason {
+	PlayerRequest = 0,
+	PlayerDisconnect = 1,
+	ExcessiveLag = 2,
+}
 
 /**
  * Configuration options for a session.
@@ -127,6 +159,24 @@ export interface SessionConfig {
 	 * @default false
 	 */
 	debug: boolean;
+
+	/**
+	 * Authority model for desync resolution in mesh topology.
+	 * - 'host': Host is authoritative; guests send hashes to host only
+	 * - 'peer': Each peer compares independently (default behavior)
+	 * Only applies when topology is 'mesh'.
+	 * @default 'peer'
+	 */
+	desyncAuthority: DesyncAuthority;
+
+	/**
+	 * Threshold (in ticks) before reporting a player as lagging.
+	 * When a remote player's confirmed tick falls this far behind,
+	 * a LagReport is sent to the host.
+	 * Set to 0 to disable lag reporting.
+	 * @default 30
+	 */
+	lagReportThreshold: number;
 }
 
 /**
@@ -135,12 +185,14 @@ export interface SessionConfig {
 export const DEFAULT_SESSION_CONFIG: SessionConfig = {
 	tickRate: 60,
 	maxPlayers: 4,
-	topology: "star",
+	topology: Topology.Star,
 	snapshotHistorySize: 120,
 	maxSpeculationTicks: 60,
 	hashInterval: 60,
 	disconnectTimeout: 5000,
 	debug: false,
+	desyncAuthority: DesyncAuthority.Peer,
+	lagReportThreshold: 30,
 };
 
 /** Maximum allowed players in a session */
@@ -191,11 +243,30 @@ export function validateSessionConfig(config: SessionConfig): void {
 		);
 	}
 
-	if (config.topology !== "mesh" && config.topology !== "star") {
+	if (config.topology !== Topology.Mesh && config.topology !== Topology.Star) {
 		throw new ValidationError(
-			"topology must be 'mesh' or 'star'",
+			"topology must be Topology.Mesh or Topology.Star",
 			"topology",
 			config.topology,
+		);
+	}
+
+	if (
+		config.desyncAuthority !== DesyncAuthority.Host &&
+		config.desyncAuthority !== DesyncAuthority.Peer
+	) {
+		throw new ValidationError(
+			"desyncAuthority must be DesyncAuthority.Host or DesyncAuthority.Peer",
+			"desyncAuthority",
+			config.desyncAuthority,
+		);
+	}
+
+	if (config.lagReportThreshold < 0) {
+		throw new ValidationError(
+			"lagReportThreshold must be >= 0",
+			"lagReportThreshold",
+			config.lagReportThreshold,
 		);
 	}
 }
@@ -207,12 +278,13 @@ export function validateSessionConfig(config: SessionConfig): void {
 /**
  * Possible states of a session.
  */
-export type SessionState =
-	| "disconnected"
-	| "connecting"
-	| "lobby"
-	| "playing"
-	| "paused";
+export enum SessionState {
+	Disconnected = 0,
+	Connecting = 1,
+	Lobby = 2,
+	Playing = 3,
+	Paused = 4,
+}
 
 // =============================================================================
 // Input Prediction
@@ -260,7 +332,11 @@ export const DEFAULT_INPUT_PREDICTOR: InputPredictor<Uint8Array> = {
 /**
  * Connection state of a player.
  */
-export type PlayerConnectionState = "connecting" | "connected" | "disconnected";
+export enum PlayerConnectionState {
+	Connecting = 0,
+	Connected = 1,
+	Disconnected = 2,
+}
 
 /**
  * Information about a player in the session.
@@ -283,6 +359,9 @@ export interface PlayerInfo {
 
 	/** Round-trip time in milliseconds (if available) */
 	rtt?: number;
+
+	/** Player's role in the session. Defaults to 'pilot'. */
+	role: PlayerRole;
 }
 
 // =============================================================================
@@ -331,7 +410,12 @@ export interface TickResult {
 /**
  * Source of an error in the rollback netcode system.
  */
-export type ErrorSource = "engine" | "transport" | "protocol" | "session";
+export enum ErrorSource {
+	Engine = 0,
+	Transport = 1,
+	Protocol = 2,
+	Session = 3,
+}
 
 /**
  * Context information for an error event.
@@ -398,6 +482,15 @@ export interface SessionEvents {
 
 	/** Fired on errors with context */
 	error: (error: Error, context: ErrorContext) => void;
+
+	/** Fired when a lag report is received (host only) */
+	lagReport: (laggyPlayerId: PlayerId, ticksBehind: number) => void;
+
+	/** Fired when a resume countdown is received */
+	resumeCountdown: (secondsRemaining: number) => void;
+
+	/** Fired when a player is dropped and replaced */
+	playerDropped: (playerId: PlayerId, metadata?: Uint8Array) => void;
 }
 
 /**

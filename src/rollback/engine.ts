@@ -110,6 +110,17 @@ export class RollbackEngine {
 	}
 
 	/**
+	 * Get the confirmed tick for a specific player.
+	 * Returns the highest tick for which we have received confirmed input from this player.
+	 *
+	 * @param playerId - The player's ID
+	 * @returns The confirmed tick, or undefined if the player is not tracked
+	 */
+	getConfirmedTickForPlayer(playerId: PlayerId): Tick | undefined {
+		return this.inputBuffer.getConfirmedTick(playerId);
+	}
+
+	/**
 	 * Set the local player's input for the current tick.
 	 * Call this before tick() to set what input the local player uses.
 	 *

@@ -6,14 +6,24 @@
  * - Bytes 1+: Message payload (varies by type)
  */
 
-import { type PlayerId, type Tick, asPlayerId, asTick } from "../types.js";
 import {
+	PauseReason,
+	type PlayerId,
+	PlayerRole,
+	type Tick,
+	asPlayerId,
+	asTick,
+} from "../types.js";
+import {
+	type DisconnectReportMessage,
+	type DropPlayerMessage,
 	type HashMessage,
 	type InputAckMessage,
 	type InputMessage,
 	type JoinAcceptMessage,
 	type JoinRejectMessage,
 	type JoinRequestMessage,
+	type LagReportMessage,
 	type Message,
 	MessageType,
 	type PauseMessage,
@@ -21,6 +31,7 @@ import {
 	type PlayerJoinedMessage,
 	type PlayerLeftMessage,
 	type PongMessage,
+	type ResumeCountdownMessage,
 	type ResumeMessage,
 	type StateSyncMessage,
 	type SyncMessage,
@@ -79,6 +90,39 @@ function ensureBytes(
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+
+// =============================================================================
+// Enum Encoding Helpers
+// =============================================================================
+
+/** Encode PlayerRole as a single byte (enum is already numeric) */
+function encodePlayerRole(role: PlayerRole): number {
+	return role;
+}
+
+/** Decode PlayerRole from a single byte */
+function decodePlayerRole(value: number): PlayerRole {
+	if (value === PlayerRole.Spectator) {
+		return PlayerRole.Spectator;
+	}
+	return PlayerRole.Player;
+}
+
+/** Encode PauseReason as a single byte (enum is already numeric) */
+function encodePauseReason(reason: PauseReason): number {
+	return reason;
+}
+
+/** Decode PauseReason from a single byte */
+function decodePauseReason(value: number): PauseReason {
+	if (value === PauseReason.PlayerDisconnect) {
+		return PauseReason.PlayerDisconnect;
+	}
+	if (value === PauseReason.ExcessiveLag) {
+		return PauseReason.ExcessiveLag;
+	}
+	return PauseReason.PlayerRequest;
+}
 
 // =============================================================================
 // Encoding Helpers
@@ -167,6 +211,14 @@ export function encodeMessage(message: Message): Uint8Array {
 			return encodePingMessage(message);
 		case MessageType.Pong:
 			return encodePongMessage(message);
+		case MessageType.LagReport:
+			return encodeLagReportMessage(message);
+		case MessageType.DisconnectReport:
+			return encodeDisconnectReportMessage(message);
+		case MessageType.ResumeCountdown:
+			return encodeResumeCountdownMessage(message);
+		case MessageType.DropPlayer:
+			return encodeDropPlayerMessage(message);
 	}
 }
 
@@ -213,6 +265,14 @@ export function decodeMessage(data: Uint8Array): Message {
 			return decodePingMessage(view);
 		case MessageType.Pong:
 			return decodePongMessage(view);
+		case MessageType.LagReport:
+			return decodeLagReportMessage(view);
+		case MessageType.DisconnectReport:
+			return decodeDisconnectReportMessage(view);
+		case MessageType.ResumeCountdown:
+			return decodeResumeCountdownMessage(view);
+		case MessageType.DropPlayer:
+			return decodeDropPlayerMessage(view);
 		default:
 			throw new DecodeError(
 				`Unknown message type: ${type}`,
@@ -503,13 +563,15 @@ function decodeSyncRequestMessage(view: DataView): SyncRequestMessage {
 
 function encodePauseMessage(msg: PauseMessage): Uint8Array {
 	const playerIdBytes = textEncoder.encode(msg.playerId);
-	const buffer = new Uint8Array(1 + 2 + playerIdBytes.length + 4);
+	const buffer = new Uint8Array(1 + 2 + playerIdBytes.length + 4 + 1);
 	const view = new DataView(buffer.buffer);
 
 	let offset = 0;
 	view.setUint8(offset++, MessageType.Pause);
 	offset += writeString(view, offset, msg.playerId);
 	view.setInt32(offset, msg.pauseTick);
+	offset += 4;
+	view.setUint8(offset, encodePauseReason(msg.reason));
 
 	return buffer;
 }
@@ -519,13 +581,16 @@ function decodePauseMessage(view: DataView): PauseMessage {
 	let offset = 1;
 	const [playerId, playerIdLen] = readString(view, offset, msgType);
 	offset += playerIdLen;
-	ensureBytes(view, offset, 4, msgType);
+	ensureBytes(view, offset, 5, msgType); // 4 for tick + 1 for reason
 	const pauseTick = asTick(view.getInt32(offset));
+	offset += 4;
+	const reason = decodePauseReason(view.getUint8(offset));
 
 	return {
 		type: MessageType.Pause,
 		playerId: asPlayerId(playerId),
 		pauseTick,
+		reason,
 	};
 }
 
@@ -569,23 +634,46 @@ function decodeResumeMessage(view: DataView): ResumeMessage {
 
 function encodeJoinRequestMessage(msg: JoinRequestMessage): Uint8Array {
 	const playerIdBytes = textEncoder.encode(msg.playerId);
-	const buffer = new Uint8Array(1 + 2 + playerIdBytes.length);
+	// Add 1 byte for role (0xFF means no role specified)
+	const buffer = new Uint8Array(1 + 2 + playerIdBytes.length + 1);
 	const view = new DataView(buffer.buffer);
 
 	let offset = 0;
 	view.setUint8(offset++, MessageType.JoinRequest);
-	writeString(view, offset, msg.playerId);
+	offset += writeString(view, offset, msg.playerId);
+	// Encode role: 0xFF = not specified, otherwise use encodePlayerRole
+	view.setUint8(
+		offset,
+		msg.role !== undefined ? encodePlayerRole(msg.role) : 0xff,
+	);
 
 	return buffer;
 }
 
 function decodeJoinRequestMessage(view: DataView): JoinRequestMessage {
 	const msgType = MessageType.JoinRequest;
-	const [playerId] = readString(view, 1, msgType);
-	return {
+	let offset = 1;
+	const [playerId, playerIdLen] = readString(view, offset, msgType);
+	offset += playerIdLen;
+
+	// Read role if present (backwards compatible: if not enough bytes, default to undefined)
+	let role: PlayerRole | undefined;
+	if (view.byteLength > offset) {
+		const roleValue = view.getUint8(offset);
+		if (roleValue !== 0xff) {
+			role = decodePlayerRole(roleValue);
+		}
+	}
+
+	// Build result with optional role only if defined
+	const result: JoinRequestMessage = {
 		type: MessageType.JoinRequest,
 		playerId: asPlayerId(playerId),
 	};
+	if (role !== undefined) {
+		result.role = role;
+	}
+	return result;
 }
 
 // =============================================================================
@@ -787,13 +875,15 @@ function decodeStateSyncMessage(view: DataView): StateSyncMessage {
 
 function encodePlayerJoinedMessage(msg: PlayerJoinedMessage): Uint8Array {
 	const playerIdBytes = textEncoder.encode(msg.playerId);
-	const buffer = new Uint8Array(1 + 2 + playerIdBytes.length + 4);
+	const buffer = new Uint8Array(1 + 2 + playerIdBytes.length + 4 + 1);
 	const view = new DataView(buffer.buffer);
 
 	let offset = 0;
 	view.setUint8(offset++, MessageType.PlayerJoined);
 	offset += writeString(view, offset, msg.playerId);
 	view.setInt32(offset, msg.joinTick);
+	offset += 4;
+	view.setUint8(offset, encodePlayerRole(msg.role));
 
 	return buffer;
 }
@@ -803,13 +893,16 @@ function decodePlayerJoinedMessage(view: DataView): PlayerJoinedMessage {
 	let offset = 1;
 	const [playerId, playerIdLen] = readString(view, offset, msgType);
 	offset += playerIdLen;
-	ensureBytes(view, offset, 4, msgType);
+	ensureBytes(view, offset, 5, msgType); // 4 for tick + 1 for role
 	const joinTick = asTick(view.getInt32(offset));
+	offset += 4;
+	const role = decodePlayerRole(view.getUint8(offset));
 
 	return {
 		type: MessageType.PlayerJoined,
 		playerId: asPlayerId(playerId),
 		joinTick,
+		role,
 	};
 }
 
@@ -894,4 +987,140 @@ function decodePongMessage(view: DataView): PongMessage {
 		type: MessageType.Pong,
 		timestamp,
 	};
+}
+
+// =============================================================================
+// LagReport Message
+// Format: type(1) + laggyPlayerId(2+N) + ticksBehind(4)
+// =============================================================================
+
+function encodeLagReportMessage(msg: LagReportMessage): Uint8Array {
+	const playerIdBytes = textEncoder.encode(msg.laggyPlayerId);
+	const buffer = new Uint8Array(1 + 2 + playerIdBytes.length + 4);
+	const view = new DataView(buffer.buffer);
+
+	let offset = 0;
+	view.setUint8(offset++, MessageType.LagReport);
+	offset += writeString(view, offset, msg.laggyPlayerId);
+	view.setInt32(offset, msg.ticksBehind);
+
+	return buffer;
+}
+
+function decodeLagReportMessage(view: DataView): LagReportMessage {
+	const msgType = MessageType.LagReport;
+	let offset = 1;
+	const [laggyPlayerId, playerIdLen] = readString(view, offset, msgType);
+	offset += playerIdLen;
+	ensureBytes(view, offset, 4, msgType);
+	const ticksBehind = view.getInt32(offset);
+
+	return {
+		type: MessageType.LagReport,
+		laggyPlayerId: asPlayerId(laggyPlayerId),
+		ticksBehind,
+	};
+}
+
+// =============================================================================
+// DisconnectReport Message
+// Format: type(1) + disconnectedPeerId(2+N)
+// =============================================================================
+
+function encodeDisconnectReportMessage(
+	msg: DisconnectReportMessage,
+): Uint8Array {
+	const playerIdBytes = textEncoder.encode(msg.disconnectedPeerId);
+	const buffer = new Uint8Array(1 + 2 + playerIdBytes.length);
+	const view = new DataView(buffer.buffer);
+
+	let offset = 0;
+	view.setUint8(offset++, MessageType.DisconnectReport);
+	writeString(view, offset, msg.disconnectedPeerId);
+
+	return buffer;
+}
+
+function decodeDisconnectReportMessage(
+	view: DataView,
+): DisconnectReportMessage {
+	const msgType = MessageType.DisconnectReport;
+	const [disconnectedPeerId] = readString(view, 1, msgType);
+
+	return {
+		type: MessageType.DisconnectReport,
+		disconnectedPeerId: asPlayerId(disconnectedPeerId),
+	};
+}
+
+// =============================================================================
+// ResumeCountdown Message
+// Format: type(1) + secondsRemaining(2)
+// =============================================================================
+
+function encodeResumeCountdownMessage(msg: ResumeCountdownMessage): Uint8Array {
+	const buffer = new Uint8Array(1 + 2);
+	const view = new DataView(buffer.buffer);
+
+	view.setUint8(0, MessageType.ResumeCountdown);
+	view.setUint16(1, msg.secondsRemaining);
+
+	return buffer;
+}
+
+function decodeResumeCountdownMessage(view: DataView): ResumeCountdownMessage {
+	const msgType = MessageType.ResumeCountdown;
+	ensureBytes(view, 1, 2, msgType);
+	const secondsRemaining = view.getUint16(1);
+
+	return {
+		type: MessageType.ResumeCountdown,
+		secondsRemaining,
+	};
+}
+
+// =============================================================================
+// DropPlayer Message
+// Format: type(1) + playerId(2+N) + hasMetadata(1) + [metadata(4+N)]
+// =============================================================================
+
+function encodeDropPlayerMessage(msg: DropPlayerMessage): Uint8Array {
+	const playerIdBytes = textEncoder.encode(msg.playerId);
+	const hasMetadata = msg.metadata !== undefined;
+	const metadataSize =
+		hasMetadata && msg.metadata ? 4 + msg.metadata.length : 0;
+	const buffer = new Uint8Array(
+		1 + 2 + playerIdBytes.length + 1 + metadataSize,
+	);
+	const view = new DataView(buffer.buffer);
+
+	let offset = 0;
+	view.setUint8(offset++, MessageType.DropPlayer);
+	offset += writeString(view, offset, msg.playerId);
+	view.setUint8(offset++, hasMetadata ? 1 : 0);
+	if (hasMetadata && msg.metadata) {
+		writeBytes(view, offset, msg.metadata);
+	}
+
+	return buffer;
+}
+
+function decodeDropPlayerMessage(view: DataView): DropPlayerMessage {
+	const msgType = MessageType.DropPlayer;
+	let offset = 1;
+	const [playerId, playerIdLen] = readString(view, offset, msgType);
+	offset += playerIdLen;
+	ensureBytes(view, offset, 1, msgType);
+	const hasMetadata = view.getUint8(offset++) === 1;
+
+	// Build result with optional metadata only if present
+	const result: DropPlayerMessage = {
+		type: MessageType.DropPlayer,
+		playerId: asPlayerId(playerId),
+	};
+	if (hasMetadata) {
+		const [data] = readBytes(view, offset, msgType);
+		result.metadata = data;
+	}
+	return result;
 }

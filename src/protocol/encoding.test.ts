@@ -1,6 +1,6 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
-import { asPlayerId, asTick } from "../types.js";
+import { PauseReason, PlayerRole, asPlayerId, asTick } from "../types.js";
 import { DecodeError, decodeMessage, encodeMessage } from "./encoding.js";
 import { MessageType } from "./messages.js";
 
@@ -174,6 +174,7 @@ describe("Message Encoding/Decoding", () => {
 				type: MessageType.Pause as const,
 				playerId: asPlayerId("host"),
 				pauseTick: asTick(200),
+				reason: PauseReason.PlayerRequest,
 			};
 
 			const encoded = encodeMessage(original);
@@ -183,6 +184,28 @@ describe("Message Encoding/Decoding", () => {
 			if (decoded.type === MessageType.Pause) {
 				assert.strictEqual(decoded.playerId, "host");
 				assert.strictEqual(decoded.pauseTick, 200);
+				assert.strictEqual(decoded.reason, PauseReason.PlayerRequest);
+			}
+		});
+
+		it("should encode all pause reasons", () => {
+			const reasons = [
+				PauseReason.PlayerRequest,
+				PauseReason.PlayerDisconnect,
+				PauseReason.ExcessiveLag,
+			];
+			for (const reason of reasons) {
+				const original = {
+					type: MessageType.Pause as const,
+					playerId: asPlayerId("host"),
+					pauseTick: asTick(100),
+					reason,
+				};
+				const encoded = encodeMessage(original);
+				const decoded = decodeMessage(encoded);
+				if (decoded.type === MessageType.Pause) {
+					assert.strictEqual(decoded.reason, reason);
+				}
 			}
 		});
 	});
@@ -292,11 +315,12 @@ describe("Message Encoding/Decoding", () => {
 	});
 
 	describe("PlayerJoinedMessage", () => {
-		it("should round-trip encode/decode", () => {
+		it("should round-trip encode/decode player", () => {
 			const original = {
 				type: MessageType.PlayerJoined as const,
 				playerId: asPlayerId("player-3"),
 				joinTick: asTick(50),
+				role: PlayerRole.Player,
 			};
 
 			const encoded = encodeMessage(original);
@@ -306,6 +330,26 @@ describe("Message Encoding/Decoding", () => {
 			if (decoded.type === MessageType.PlayerJoined) {
 				assert.strictEqual(decoded.playerId, "player-3");
 				assert.strictEqual(decoded.joinTick, 50);
+				assert.strictEqual(decoded.role, PlayerRole.Player);
+			}
+		});
+
+		it("should round-trip encode/decode spectator", () => {
+			const original = {
+				type: MessageType.PlayerJoined as const,
+				playerId: asPlayerId("spectator-1"),
+				joinTick: asTick(100),
+				role: PlayerRole.Spectator,
+			};
+
+			const encoded = encodeMessage(original);
+			const decoded = decodeMessage(encoded);
+
+			assert.strictEqual(decoded.type, MessageType.PlayerJoined);
+			if (decoded.type === MessageType.PlayerJoined) {
+				assert.strictEqual(decoded.playerId, "spectator-1");
+				assert.strictEqual(decoded.joinTick, 100);
+				assert.strictEqual(decoded.role, PlayerRole.Spectator);
 			}
 		});
 	});
@@ -359,6 +403,146 @@ describe("Message Encoding/Decoding", () => {
 			assert.strictEqual(decoded.type, MessageType.Pong);
 			if (decoded.type === MessageType.Pong) {
 				assert.strictEqual(decoded.timestamp, original.timestamp);
+			}
+		});
+	});
+
+	describe("LagReportMessage", () => {
+		it("should round-trip encode/decode", () => {
+			const original = {
+				type: MessageType.LagReport as const,
+				laggyPlayerId: asPlayerId("slow-player"),
+				ticksBehind: 45,
+			};
+
+			const encoded = encodeMessage(original);
+			const decoded = decodeMessage(encoded);
+
+			assert.strictEqual(decoded.type, MessageType.LagReport);
+			if (decoded.type === MessageType.LagReport) {
+				assert.strictEqual(decoded.laggyPlayerId, "slow-player");
+				assert.strictEqual(decoded.ticksBehind, 45);
+			}
+		});
+	});
+
+	describe("DisconnectReportMessage", () => {
+		it("should round-trip encode/decode", () => {
+			const original = {
+				type: MessageType.DisconnectReport as const,
+				disconnectedPeerId: asPlayerId("disconnected-player"),
+			};
+
+			const encoded = encodeMessage(original);
+			const decoded = decodeMessage(encoded);
+
+			assert.strictEqual(decoded.type, MessageType.DisconnectReport);
+			if (decoded.type === MessageType.DisconnectReport) {
+				assert.strictEqual(decoded.disconnectedPeerId, "disconnected-player");
+			}
+		});
+	});
+
+	describe("ResumeCountdownMessage", () => {
+		it("should round-trip encode/decode", () => {
+			const original = {
+				type: MessageType.ResumeCountdown as const,
+				secondsRemaining: 5,
+			};
+
+			const encoded = encodeMessage(original);
+			const decoded = decodeMessage(encoded);
+
+			assert.strictEqual(decoded.type, MessageType.ResumeCountdown);
+			if (decoded.type === MessageType.ResumeCountdown) {
+				assert.strictEqual(decoded.secondsRemaining, 5);
+			}
+		});
+	});
+
+	describe("DropPlayerMessage", () => {
+		it("should round-trip encode/decode without metadata", () => {
+			const original = {
+				type: MessageType.DropPlayer as const,
+				playerId: asPlayerId("dropped-player"),
+			};
+
+			const encoded = encodeMessage(original);
+			const decoded = decodeMessage(encoded);
+
+			assert.strictEqual(decoded.type, MessageType.DropPlayer);
+			if (decoded.type === MessageType.DropPlayer) {
+				assert.strictEqual(decoded.playerId, "dropped-player");
+				assert.strictEqual(decoded.metadata, undefined);
+			}
+		});
+
+		it("should round-trip encode/decode with metadata", () => {
+			const original = {
+				type: MessageType.DropPlayer as const,
+				playerId: asPlayerId("dropped-player"),
+				metadata: new Uint8Array([1, 2, 3, 4, 5]),
+			};
+
+			const encoded = encodeMessage(original);
+			const decoded = decodeMessage(encoded);
+
+			assert.strictEqual(decoded.type, MessageType.DropPlayer);
+			if (decoded.type === MessageType.DropPlayer) {
+				assert.strictEqual(decoded.playerId, "dropped-player");
+				assert.deepStrictEqual(decoded.metadata, original.metadata);
+			}
+		});
+	});
+
+	describe("JoinRequestMessage with role", () => {
+		it("should round-trip encode/decode with player role", () => {
+			const original = {
+				type: MessageType.JoinRequest as const,
+				playerId: asPlayerId("player-1"),
+				role: PlayerRole.Player,
+			};
+
+			const encoded = encodeMessage(original);
+			const decoded = decodeMessage(encoded);
+
+			assert.strictEqual(decoded.type, MessageType.JoinRequest);
+			if (decoded.type === MessageType.JoinRequest) {
+				assert.strictEqual(decoded.playerId, "player-1");
+				assert.strictEqual(decoded.role, PlayerRole.Player);
+			}
+		});
+
+		it("should round-trip encode/decode with spectator role", () => {
+			const original = {
+				type: MessageType.JoinRequest as const,
+				playerId: asPlayerId("spectator-1"),
+				role: PlayerRole.Spectator,
+			};
+
+			const encoded = encodeMessage(original);
+			const decoded = decodeMessage(encoded);
+
+			assert.strictEqual(decoded.type, MessageType.JoinRequest);
+			if (decoded.type === MessageType.JoinRequest) {
+				assert.strictEqual(decoded.playerId, "spectator-1");
+				assert.strictEqual(decoded.role, PlayerRole.Spectator);
+			}
+		});
+
+		it("should round-trip encode/decode without role", () => {
+			const original = {
+				type: MessageType.JoinRequest as const,
+				playerId: asPlayerId("player-1"),
+			};
+
+			const encoded = encodeMessage(original);
+			const decoded = decodeMessage(encoded);
+
+			assert.strictEqual(decoded.type, MessageType.JoinRequest);
+			if (decoded.type === MessageType.JoinRequest) {
+				assert.strictEqual(decoded.playerId, "player-1");
+				assert.strictEqual(decoded.role, undefined);
 			}
 		});
 	});

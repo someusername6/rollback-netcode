@@ -4,7 +4,13 @@ import {
 	LocalTransport,
 	createLocalTransportGroup,
 } from "../transport/local.js";
-import { type Game, type PlayerId, asPlayerId, asTick } from "../types.js";
+import {
+	type Game,
+	type PlayerId,
+	SessionState,
+	asPlayerId,
+	asTick,
+} from "../types.js";
 import { type Session, createSession } from "./session.js";
 
 /**
@@ -74,7 +80,7 @@ describe("Session", () => {
 
 			assert.ok(roomId);
 			assert.strictEqual(session.isHost, true);
-			assert.strictEqual(session.state, "lobby");
+			assert.strictEqual(session.state, SessionState.Lobby);
 			assert.strictEqual(session.roomId, roomId);
 		});
 
@@ -114,7 +120,7 @@ describe("Session", () => {
 			clientTransport.flush(); // Deliver JoinRequest to host
 			hostTransport.flush(); // Deliver JoinAccept to client
 
-			assert.strictEqual(clientSession.state, "lobby");
+			assert.strictEqual(clientSession.state, SessionState.Lobby);
 			assert.strictEqual(clientSession.isHost, false);
 		});
 	});
@@ -147,8 +153,8 @@ describe("Session", () => {
 			hostTransport.flush(); // Host sends StateSync
 			clientTransport.flush(); // Client receives it
 
-			assert.strictEqual(hostSession.state, "playing");
-			assert.strictEqual(clientSession.state, "playing");
+			assert.strictEqual(hostSession.state, SessionState.Playing);
+			assert.strictEqual(clientSession.state, SessionState.Playing);
 		});
 
 		it("should throw when non-host tries to start", async () => {
@@ -258,7 +264,7 @@ describe("Session", () => {
 			session.start();
 			session.pause();
 
-			assert.strictEqual(session.state, "paused");
+			assert.strictEqual(session.state, SessionState.Paused);
 		});
 
 		it("should resume game", async () => {
@@ -271,7 +277,7 @@ describe("Session", () => {
 			session.pause();
 			session.resume();
 
-			assert.strictEqual(session.state, "playing");
+			assert.strictEqual(session.state, SessionState.Playing);
 		});
 
 		it("should not advance during pause", async () => {
@@ -303,7 +309,7 @@ describe("Session", () => {
 
 			session.leaveRoom();
 
-			assert.strictEqual(session.state, "disconnected");
+			assert.strictEqual(session.state, SessionState.Disconnected);
 			assert.strictEqual(session.roomId, null);
 			assert.strictEqual(session.isHost, false);
 			assert.strictEqual(session.currentTick, 0);
@@ -316,7 +322,7 @@ describe("Session", () => {
 			const game = new TestGame();
 			const session = createSession({ game, transport });
 
-			const stateChanges: string[] = [];
+			const stateChanges: SessionState[] = [];
 			session.on("stateChange", (newState) => {
 				stateChanges.push(newState);
 			});
@@ -328,11 +334,11 @@ describe("Session", () => {
 			session.leaveRoom();
 
 			assert.deepStrictEqual(stateChanges, [
-				"lobby",
-				"playing",
-				"paused",
-				"playing",
-				"disconnected",
+				SessionState.Lobby,
+				SessionState.Playing,
+				SessionState.Paused,
+				SessionState.Playing,
+				SessionState.Disconnected,
 			]);
 		});
 
@@ -422,7 +428,7 @@ describe("Session", () => {
 
 			// Verify all sessions are playing
 			for (const session of sessions.values()) {
-				assert.strictEqual(session.state, "playing");
+				assert.strictEqual(session.state, SessionState.Playing);
 			}
 
 			// Run 5 ticks
@@ -525,7 +531,7 @@ describe("Session", () => {
 			});
 
 			await session.createRoom();
-			assert.strictEqual(session.state, "lobby");
+			assert.strictEqual(session.state, SessionState.Lobby);
 		});
 	});
 

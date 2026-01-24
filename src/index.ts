@@ -82,8 +82,10 @@ export type { Message } from "./protocol/messages.js";
 
 // Core types
 export type {
+	DesyncAuthority,
 	Game,
 	PlayerId,
+	PlayerRole,
 	Tick,
 	TickResult,
 	SessionConfig,
@@ -95,6 +97,8 @@ export type {
 	PlayerTimeline,
 	ErrorContext,
 	ErrorSource,
+	PauseReason,
+	Topology,
 } from "./types.js";
 
 export {

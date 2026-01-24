@@ -57,6 +57,130 @@ interface PendingMessage {
 }
 
 /**
+ * Min-heap implementation for efficient message queue ordering.
+ * Uses deliverAt time as the priority.
+ */
+class MessageHeap {
+	private readonly heap: PendingMessage[] = [];
+
+	/**
+	 * Get the number of messages in the heap.
+	 */
+	get length(): number {
+		return this.heap.length;
+	}
+
+	/**
+	 * Insert a message into the heap. O(log n)
+	 */
+	push(message: PendingMessage): void {
+		this.heap.push(message);
+		this.bubbleUp(this.heap.length - 1);
+	}
+
+	/**
+	 * Remove and return the message with the earliest delivery time. O(log n)
+	 */
+	pop(): PendingMessage | undefined {
+		if (this.heap.length === 0) {
+			return undefined;
+		}
+
+		const min = this.heap[0];
+		const last = this.heap.pop();
+
+		if (this.heap.length > 0 && last !== undefined) {
+			this.heap[0] = last;
+			this.bubbleDown(0);
+		}
+
+		return min;
+	}
+
+	/**
+	 * Peek at the message with the earliest delivery time without removing it.
+	 */
+	peek(): PendingMessage | undefined {
+		return this.heap[0];
+	}
+
+	/**
+	 * Clear all messages from the heap.
+	 */
+	clear(): void {
+		this.heap.length = 0;
+	}
+
+	/**
+	 * Move a node up the heap to maintain heap property.
+	 */
+	private bubbleUp(startIndex: number): void {
+		let idx = startIndex;
+		while (idx > 0) {
+			const parentIndex = Math.floor((idx - 1) / 2);
+			const parent = this.heap[parentIndex];
+			const current = this.heap[idx];
+
+			if (parent === undefined || current === undefined) break;
+			if (parent.deliverAt <= current.deliverAt) break;
+
+			// Swap with parent
+			this.heap[parentIndex] = current;
+			this.heap[idx] = parent;
+			idx = parentIndex;
+		}
+	}
+
+	/**
+	 * Move a node down the heap to maintain heap property.
+	 */
+	private bubbleDown(startIndex: number): void {
+		const length = this.heap.length;
+		let idx = startIndex;
+
+		while (true) {
+			const leftIndex = 2 * idx + 1;
+			const rightIndex = 2 * idx + 2;
+			let smallest = idx;
+
+			const current = this.heap[idx];
+			const left = this.heap[leftIndex];
+			const right = this.heap[rightIndex];
+
+			if (current === undefined) break;
+
+			if (
+				leftIndex < length &&
+				left !== undefined &&
+				left.deliverAt < current.deliverAt
+			) {
+				smallest = leftIndex;
+			}
+
+			const smallestItem = this.heap[smallest];
+			if (
+				rightIndex < length &&
+				right !== undefined &&
+				smallestItem !== undefined &&
+				right.deliverAt < smallestItem.deliverAt
+			) {
+				smallest = rightIndex;
+			}
+
+			if (smallest === idx) break;
+
+			// Swap with smallest child
+			const swap = this.heap[smallest];
+			if (swap !== undefined) {
+				this.heap[smallest] = current;
+				this.heap[idx] = swap;
+			}
+			idx = smallest;
+		}
+	}
+}
+
+/**
  * Simple seeded random number generator for deterministic testing.
  */
 class SeededRandom {
@@ -93,7 +217,7 @@ export class LocalTransport implements TransportAdapter {
 
 	private readonly _connectedPeers: Set<string> = new Set();
 	private readonly linkedTransports: Map<string, LocalTransport> = new Map();
-	private readonly pendingMessages: PendingMessage[] = [];
+	private readonly pendingMessages: MessageHeap = new MessageHeap();
 	private readonly config: Required<LocalTransportConfig>;
 	private readonly random: SeededRandom | null;
 	private currentTime = 0;
@@ -206,6 +330,7 @@ export class LocalTransport implements TransportAdapter {
 
 	/**
 	 * Send a message to a specific peer.
+	 * Uses a min-heap for O(log n) insertion instead of O(n log n) sort.
 	 */
 	send(peerId: string, message: Uint8Array, reliable: boolean): void {
 		if (!this._connectedPeers.has(peerId)) {
@@ -224,15 +349,13 @@ export class LocalTransport implements TransportAdapter {
 		const messageCopy = new Uint8Array(message.length);
 		messageCopy.set(message);
 
+		// Push to heap - O(log n) instead of O(n log n) for sort
 		this.pendingMessages.push({
 			targetPeerId: peerId,
 			message: messageCopy,
 			deliverAt,
 			reliable,
 		});
-
-		// Sort by delivery time (stable sort preserves order for same time)
-		this.pendingMessages.sort((a, b) => a.deliverAt - b.deliverAt);
 	}
 
 	/**
@@ -250,7 +373,7 @@ export class LocalTransport implements TransportAdapter {
 	 */
 	flush(): void {
 		while (this.pendingMessages.length > 0) {
-			const pending = this.pendingMessages.shift();
+			const pending = this.pendingMessages.pop();
 			if (pending !== undefined) {
 				this.deliverMessage(pending);
 			}
@@ -291,14 +414,15 @@ export class LocalTransport implements TransportAdapter {
 
 	/**
 	 * Deliver all messages that are due based on current time.
+	 * Uses O(k log n) where k is the number of messages delivered.
 	 */
 	private deliverDueMessages(): void {
 		while (this.pendingMessages.length > 0) {
-			const first = this.pendingMessages[0];
+			const first = this.pendingMessages.peek();
 			if (first === undefined || first.deliverAt > this.currentTime) {
 				break;
 			}
-			this.pendingMessages.shift();
+			this.pendingMessages.pop();
 			this.deliverMessage(first);
 		}
 	}
