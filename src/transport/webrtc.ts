@@ -8,7 +8,25 @@
  * mechanism (WebSocket, HTTP, etc.) to exchange SDP offers/answers and ICE candidates.
  */
 
-import type { TransportAdapter } from "./adapter.js";
+import type { ConnectionMetrics, TransportAdapter } from "./adapter.js";
+
+/** Delay in ms before treating a disconnected state as failed */
+const DISCONNECT_DETECTION_DELAY_MS = 5000;
+
+/** Default maximum reconnection attempts */
+const DEFAULT_MAX_RECONNECT_ATTEMPTS = 3;
+
+/** Default delay between reconnection attempts in ms */
+const DEFAULT_RECONNECT_DELAY_MS = 1000;
+
+/** Maximum delay between reconnection attempts in ms */
+const MAX_RECONNECT_DELAY_MS = 30000;
+
+/** Jitter factor for reconnection delay (0.2 = 20% random variance) */
+const RECONNECT_JITTER_FACTOR = 0.2;
+
+/** Number of RTT samples to keep for jitter calculation */
+const RTT_SAMPLE_COUNT = 10;
 
 /**
  * Configuration for the WebRTC transport.
@@ -78,6 +96,29 @@ interface PeerConnection {
 }
 
 /**
+ * Internal metrics tracking data for a peer.
+ */
+interface PeerMetricsData {
+	/** Recent RTT samples for averaging and jitter calculation */
+	rttSamples: number[];
+
+	/** Current average RTT */
+	rtt: number;
+
+	/** Current jitter (standard deviation of RTT) */
+	jitter: number;
+
+	/** Estimated packet loss rate */
+	packetLoss: number;
+
+	/** Last time metrics were updated */
+	lastUpdated: number;
+
+	/** Pending ping timestamps (timestamp -> sentAt) */
+	pendingPings: Map<number, number>;
+}
+
+/**
  * Default RTCPeerConnection configuration.
  */
 const DEFAULT_RTC_CONFIG: RTCConfiguration = {
@@ -116,6 +157,7 @@ export class WebRTCTransport implements TransportAdapter {
 
 	private readonly peers: Map<string, PeerConnection> = new Map();
 	private readonly _connectedPeers: Set<string> = new Set();
+	private readonly peerMetrics: Map<string, PeerMetricsData> = new Map();
 
 	private signalingCallbacks: SignalingCallbacks | null = null;
 
@@ -137,8 +179,9 @@ export class WebRTCTransport implements TransportAdapter {
 			config.reliableChannelConfig ?? DEFAULT_RELIABLE_CHANNEL_CONFIG;
 		this.unreliableChannelConfig =
 			config.unreliableChannelConfig ?? DEFAULT_UNRELIABLE_CHANNEL_CONFIG;
-		this.maxReconnectAttempts = config.maxReconnectAttempts ?? 3;
-		this.reconnectDelay = config.reconnectDelay ?? 1000;
+		this.maxReconnectAttempts =
+			config.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS;
+		this.reconnectDelay = config.reconnectDelay ?? DEFAULT_RECONNECT_DELAY_MS;
 	}
 
 	/**
@@ -310,7 +353,9 @@ export class WebRTCTransport implements TransportAdapter {
 		}
 
 		try {
-			channel.send(message);
+			// RTCDataChannel.send accepts Uint8Array at runtime, but TypeScript's
+			// strict types complain about SharedArrayBuffer. Cast to satisfy types.
+			channel.send(message as unknown as ArrayBufferView<ArrayBuffer>);
 		} catch (error) {
 			console.warn(`Failed to send message to peer ${peerId}:`, error);
 		}
@@ -400,7 +445,7 @@ export class WebRTCTransport implements TransportAdapter {
 					if (connection.iceConnectionState === "disconnected") {
 						this.handleConnectionFailure(peerId, peer);
 					}
-				}, 5000);
+				}, DISCONNECT_DETECTION_DELAY_MS);
 			} else if (state === "closed") {
 				this.cleanupPeer(peerId, peer);
 			}
@@ -510,12 +555,38 @@ export class WebRTCTransport implements TransportAdapter {
 			peer.reconnectAttempts < this.maxReconnectAttempts
 		) {
 			peer.reconnectAttempts++;
+			const delay = this.getReconnectDelayWithJitter(peer.reconnectAttempts);
 			setTimeout(() => {
 				this.attemptReconnect(peerId);
-			}, this.reconnectDelay);
+			}, delay);
 		} else {
 			this.cleanupPeer(peerId, peer);
 		}
+	}
+
+	/**
+	 * Calculate reconnection delay with exponential backoff.
+	 *
+	 * @param attempt - The reconnection attempt number (1-based)
+	 * @returns The base delay in milliseconds
+	 */
+	private getReconnectDelay(attempt: number): number {
+		// Exponential backoff: baseDelay * 2^(attempt-1)
+		const delay = this.reconnectDelay * Math.pow(2, attempt - 1);
+		return Math.min(delay, MAX_RECONNECT_DELAY_MS);
+	}
+
+	/**
+	 * Calculate reconnection delay with exponential backoff and jitter.
+	 * Jitter prevents multiple peers from reconnecting at exactly the same time.
+	 *
+	 * @param attempt - The reconnection attempt number (1-based)
+	 * @returns The delay in milliseconds with random jitter applied
+	 */
+	private getReconnectDelayWithJitter(attempt: number): number {
+		const baseDelay = this.getReconnectDelay(attempt);
+		const jitter = baseDelay * RECONNECT_JITTER_FACTOR * Math.random();
+		return Math.floor(baseDelay + jitter);
 	}
 
 	/**
@@ -558,6 +629,7 @@ export class WebRTCTransport implements TransportAdapter {
 		peer.isConnected = false;
 		this._connectedPeers.delete(peerId);
 		this.peers.delete(peerId);
+		this.peerMetrics.delete(peerId);
 
 		// Reject connection promise if pending
 		if (peer.connectionReject) {
@@ -569,5 +641,120 @@ export class WebRTCTransport implements TransportAdapter {
 		if (wasConnected) {
 			this.onDisconnect?.(peerId);
 		}
+	}
+
+	/**
+	 * Get connection quality metrics for a peer.
+	 *
+	 * @param peerId - The peer's ID
+	 * @returns Connection metrics or null if not available
+	 */
+	getConnectionMetrics(peerId: string): ConnectionMetrics | null {
+		const metrics = this.peerMetrics.get(peerId);
+		if (!metrics) {
+			return null;
+		}
+
+		return {
+			rtt: metrics.rtt,
+			jitter: metrics.jitter,
+			packetLoss: metrics.packetLoss,
+			lastUpdated: metrics.lastUpdated,
+		};
+	}
+
+	/**
+	 * Record a ping sent to a peer for RTT tracking.
+	 * Call this when sending a Ping message.
+	 *
+	 * @param peerId - The peer's ID
+	 * @param timestamp - The timestamp sent in the ping
+	 */
+	recordPingSent(peerId: string, timestamp: number): void {
+		const metrics = this.getOrCreateMetrics(peerId);
+		metrics.pendingPings.set(timestamp, Date.now());
+	}
+
+	/**
+	 * Record a pong received from a peer for RTT calculation.
+	 * Call this when receiving a Pong message.
+	 *
+	 * @param peerId - The peer's ID
+	 * @param timestamp - The timestamp from the pong (originally from our ping)
+	 */
+	recordPongReceived(peerId: string, timestamp: number): void {
+		const metrics = this.getOrCreateMetrics(peerId);
+		const sentAt = metrics.pendingPings.get(timestamp);
+
+		if (sentAt !== undefined) {
+			const rtt = Date.now() - sentAt;
+			this.updateRttMetrics(metrics, rtt);
+			metrics.pendingPings.delete(timestamp);
+		}
+	}
+
+	/**
+	 * Update packet loss estimate.
+	 * Call this when detecting gaps in received input acks.
+	 *
+	 * @param peerId - The peer's ID
+	 * @param received - Number of packets received
+	 * @param expected - Number of packets expected
+	 */
+	updatePacketLoss(peerId: string, received: number, expected: number): void {
+		if (expected <= 0) return;
+
+		const metrics = this.getOrCreateMetrics(peerId);
+		const lossRate = Math.max(0, Math.min(1, 1 - received / expected));
+
+		// Exponential moving average
+		metrics.packetLoss = metrics.packetLoss * 0.8 + lossRate * 0.2;
+		metrics.lastUpdated = Date.now();
+	}
+
+	/**
+	 * Get or create metrics data for a peer.
+	 */
+	private getOrCreateMetrics(peerId: string): PeerMetricsData {
+		let metrics = this.peerMetrics.get(peerId);
+		if (!metrics) {
+			metrics = {
+				rttSamples: [],
+				rtt: 0,
+				jitter: 0,
+				packetLoss: 0,
+				lastUpdated: Date.now(),
+				pendingPings: new Map(),
+			};
+			this.peerMetrics.set(peerId, metrics);
+		}
+		return metrics;
+	}
+
+	/**
+	 * Update RTT metrics with a new sample.
+	 */
+	private updateRttMetrics(metrics: PeerMetricsData, rtt: number): void {
+		// Add sample to buffer
+		metrics.rttSamples.push(rtt);
+		if (metrics.rttSamples.length > RTT_SAMPLE_COUNT) {
+			metrics.rttSamples.shift();
+		}
+
+		// Calculate average RTT
+		const sum = metrics.rttSamples.reduce((a, b) => a + b, 0);
+		metrics.rtt = sum / metrics.rttSamples.length;
+
+		// Calculate jitter (standard deviation)
+		if (metrics.rttSamples.length > 1) {
+			const squaredDiffs = metrics.rttSamples.map(
+				(sample) => (sample - metrics.rtt) ** 2,
+			);
+			const avgSquaredDiff =
+				squaredDiffs.reduce((a, b) => a + b, 0) / squaredDiffs.length;
+			metrics.jitter = Math.sqrt(avgSquaredDiff);
+		}
+
+		metrics.lastUpdated = Date.now();
 	}
 }

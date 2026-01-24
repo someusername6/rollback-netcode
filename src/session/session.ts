@@ -4,8 +4,13 @@
  * Handles room management, player join/leave, message routing, and desync detection.
  */
 
-import type { TransportAdapter } from "../transport/adapter.js";
+import type {
+	ConnectionMetrics,
+	TransportAdapter,
+} from "../transport/adapter.js";
 import {
+	DEFAULT_SESSION_CONFIG,
+	type ErrorContext,
 	type Game,
 	type InputPredictor,
 	type PlayerId,
@@ -15,10 +20,13 @@ import {
 	type SessionState,
 	type Tick,
 	type TickResult,
-	DEFAULT_SESSION_CONFIG,
 	asPlayerId,
 	asTick,
+	validateSessionConfig,
 } from "../types.js";
+
+/** Number of ticks of input to include in each message for redundancy */
+const DEFAULT_INPUT_REDUNDANCY = 3;
 import { decodeMessage, encodeMessage } from "../protocol/encoding.js";
 import {
 	type Message,
@@ -29,15 +37,22 @@ import {
 	isJoinRejectMessage,
 	isJoinRequestMessage,
 	isPauseMessage,
+	isPingMessage,
 	isPlayerJoinedMessage,
 	isPlayerLeftMessage,
+	isPongMessage,
+	isReliableMessage,
 	isResumeMessage,
 	isStateSyncMessage,
 	isSyncMessage,
 	isSyncRequestMessage,
-	isReliableMessage,
 } from "../protocol/messages.js";
-import { RollbackEngine } from "../rollback/engine.js";
+import {
+	RollbackEngine,
+	type RollbackEngineConfig,
+} from "../rollback/engine.js";
+import { type TopologyStrategy, createTopologyStrategy } from "./topology.js";
+import { type DebugLogger, createDebugLogger } from "../debug.js";
 
 /**
  * Options for creating a session.
@@ -74,43 +89,62 @@ function generateRoomId(): string {
 /**
  * Session manager that coordinates the rollback engine with network transport.
  */
+// Type alias for event handler functions
+type EventHandler = (...args: never[]) => void;
+
 export class Session {
 	private readonly game: Game;
 	private readonly transport: TransportAdapter;
 	private readonly config: SessionConfig;
 	private readonly engine: RollbackEngine;
-	private readonly eventHandlers: Map<keyof SessionEvents, Set<Function>> =
+	private readonly eventHandlers: Map<keyof SessionEvents, Set<EventHandler>> =
 		new Map();
+	private readonly _localPlayerId: PlayerId;
+	private readonly topologyStrategy: TopologyStrategy;
+	private readonly debug: DebugLogger;
 
 	private _state: SessionState = "disconnected";
 	private _isHost = false;
 	private _roomId: string | null = null;
 	private readonly _players: Map<PlayerId, PlayerInfo> = new Map();
 	private lastHashBroadcastTick: Tick = asTick(-1);
-	private inputRedundancy = 3; // Number of ticks of input to send for redundancy
+	private inputRedundancy = DEFAULT_INPUT_REDUNDANCY;
 
 	/**
 	 * Create a new session.
+	 * @throws ValidationError if config values are invalid
 	 */
 	constructor(options: CreateSessionOptions) {
 		this.game = options.game;
 		this.transport = options.transport;
 		this.config = { ...DEFAULT_SESSION_CONFIG, ...options.config };
 
-		const localPlayerId =
+		// Validate configuration
+		validateSessionConfig(this.config);
+
+		this._localPlayerId =
 			options.localPlayerId ?? asPlayerId(this.transport.localPeerId);
 
-		this.engine = new RollbackEngine({
+		// Create topology strategy
+		this.topologyStrategy = createTopologyStrategy(this.config.topology);
+
+		// Create debug logger
+		this.debug = createDebugLogger(this.config.debug);
+
+		const engineConfig: RollbackEngineConfig = {
 			game: this.game,
-			localPlayerId,
+			localPlayerId: this._localPlayerId,
 			snapshotHistorySize: this.config.snapshotHistorySize,
 			maxSpeculationTicks: this.config.maxSpeculationTicks,
-			inputPredictor: options.inputPredictor,
-		});
+		};
+		if (options.inputPredictor) {
+			engineConfig.inputPredictor = options.inputPredictor;
+		}
+		this.engine = new RollbackEngine(engineConfig);
 
 		// Initialize local player info
-		this._players.set(localPlayerId, {
-			id: localPlayerId,
+		this._players.set(this._localPlayerId, {
+			id: this._localPlayerId,
 			connectionState: "connected",
 			joinTick: null,
 			leaveTick: null,
@@ -141,7 +175,7 @@ export class Session {
 	 * Local player's ID.
 	 */
 	get localPlayerId(): PlayerId {
-		return asPlayerId(this.transport.localPeerId);
+		return this._localPlayerId;
 	}
 
 	/**
@@ -170,6 +204,29 @@ export class Session {
 	 */
 	get confirmedTick(): Tick {
 		return this.engine.confirmedTick;
+	}
+
+	/**
+	 * Get connection quality metrics for a player.
+	 *
+	 * @param playerId - The player's ID
+	 * @returns Connection metrics or null if not available
+	 */
+	getPlayerMetrics(playerId: PlayerId): ConnectionMetrics | null {
+		// Local player doesn't have network metrics
+		if (playerId === this.localPlayerId) {
+			return null;
+		}
+
+		// Get the peer ID for this player - in this case player ID is the peer ID
+		const peerId = playerId as string;
+
+		// Check if transport supports metrics
+		if (this.transport.getConnectionMetrics) {
+			return this.transport.getConnectionMetrics(peerId);
+		}
+
+		return null;
 	}
 
 	/**
@@ -364,6 +421,14 @@ export class Session {
 		// Run the engine tick
 		const result = this.engine.tick();
 
+		// Log rollback if it occurred
+		if (result.rolledBack && result.rollbackTicks !== undefined) {
+			this.debug.log("Rollback triggered", {
+				tick: result.tick,
+				rollbackTicks: result.rollbackTicks,
+			});
+		}
+
 		// Periodic hash broadcast for desync detection
 		this.maybeBroadcastHash();
 
@@ -394,7 +459,7 @@ export class Session {
 		if (!this.eventHandlers.has(event)) {
 			this.eventHandlers.set(event, new Set());
 		}
-		this.eventHandlers.get(event)!.add(handler);
+		this.eventHandlers.get(event)?.add(handler);
 	}
 
 	/**
@@ -418,12 +483,31 @@ export class Session {
 		if (handlers) {
 			for (const handler of handlers) {
 				try {
-					(handler as Function)(...args);
-				} catch (error) {
-					console.error(`Error in event handler for ${event}:`, error);
+					(handler as (...args: Parameters<SessionEvents[E]>) => void)(...args);
+				} catch (handlerError) {
+					// Avoid infinite recursion: don't emit error events for errors in error handlers
+					if (event !== "error") {
+						this.emitError(
+							handlerError instanceof Error
+								? handlerError
+								: new Error(String(handlerError)),
+							{
+								source: "session",
+								recoverable: true,
+								details: { event },
+							},
+						);
+					}
 				}
 			}
 		}
+	}
+
+	/**
+	 * Emit an error event with context.
+	 */
+	private emitError(error: Error, context: ErrorContext): void {
+		this.emit("error", error, context);
 	}
 
 	/**
@@ -445,7 +529,14 @@ export class Session {
 		try {
 			message = decodeMessage(data);
 		} catch (error) {
-			console.error("Failed to decode message:", error);
+			this.emitError(
+				error instanceof Error ? error : new Error(String(error)),
+				{
+					source: "protocol",
+					recoverable: true,
+					details: { peerId, dataLength: data.length },
+				},
+			);
 			return;
 		}
 
@@ -471,6 +562,10 @@ export class Session {
 			this.handlePause(message);
 		} else if (isResumeMessage(message)) {
 			this.handleResume(message);
+		} else if (isPingMessage(message)) {
+			this.handlePing(peerId, message);
+		} else if (isPongMessage(message)) {
+			this.handlePong(peerId, message);
 		}
 	}
 
@@ -478,6 +573,8 @@ export class Session {
 	 * Handle peer connection.
 	 */
 	private handlePeerConnect(peerId: string): void {
+		this.debug.log("Peer connected", { peerId });
+
 		// Update player state if known
 		const playerId = asPlayerId(peerId);
 		const player = this._players.get(playerId);
@@ -490,6 +587,8 @@ export class Session {
 	 * Handle peer disconnection.
 	 */
 	private handlePeerDisconnect(peerId: string): void {
+		this.debug.log("Peer disconnected", { peerId });
+
 		const playerId = asPlayerId(peerId);
 		const player = this._players.get(playerId);
 
@@ -514,13 +613,26 @@ export class Session {
 			this.engine.receiveRemoteInput(message.playerId, tick, input);
 		}
 
-		// If we're the host in a star topology, relay inputs to other clients
-		if (this._isHost && this.config.topology === "star") {
-			// Rebroadcast the input to all other clients
-			const encoded = encodeMessage(message);
-			for (const peerId of this.transport.connectedPeers) {
-				// Don't send back to the original sender
-				if (peerId !== message.playerId) {
+		// Log once per message, not per input (reduces noise)
+		if (message.inputs.length > 0) {
+			this.debug.trace("Inputs received", {
+				playerId: message.playerId,
+				count: message.inputs.length,
+				ticks: message.inputs.map((i) => i.tick),
+			});
+		}
+
+		// Check if we should relay inputs based on topology
+		if (
+			this.topologyStrategy.shouldRelayInput(message.playerId, this._isHost)
+		) {
+			const targets = this.topologyStrategy.getRelayTargets(
+				message.playerId,
+				this.transport.connectedPeers,
+			);
+			if (targets.length > 0) {
+				const encoded = encodeMessage(message);
+				for (const peerId of targets) {
 					this.transport.send(peerId, encoded, false);
 				}
 			}
@@ -536,6 +648,13 @@ export class Session {
 		const localHash = this.engine.getHash(message.tick);
 
 		if (localHash !== undefined && localHash !== message.hash) {
+			this.debug.warn("Desync detected", {
+				tick: message.tick,
+				localHash,
+				remoteHash: message.hash,
+				remotePlayer: message.playerId,
+			});
+
 			this.emit("desync", message.tick, localHash, message.hash);
 
 			// Request sync if we're not the host
@@ -592,7 +711,7 @@ export class Session {
 		};
 
 		// Send to the requesting player
-		this.sendToPeer(message.playerId as string, syncMsg, true);
+		this.sendToPeer(message.playerId, syncMsg, true);
 	}
 
 	/**
@@ -686,7 +805,11 @@ export class Session {
 		message: Message & { type: MessageType.JoinReject },
 	): void {
 		this.setState("disconnected");
-		this.emit("error", new Error(`Join rejected: ${message.reason}`));
+		this.emitError(new Error(`Join rejected: ${message.reason}`), {
+			source: "session",
+			recoverable: false,
+			details: { reason: message.reason, playerId: message.playerId },
+		});
 	}
 
 	/**
@@ -734,6 +857,58 @@ export class Session {
 	 */
 	private handleResume(_message: Message & { type: MessageType.Resume }): void {
 		this.setState("playing");
+	}
+
+	/**
+	 * Handle ping message - respond with pong.
+	 */
+	private handlePing(
+		peerId: string,
+		message: Message & { type: MessageType.Ping },
+	): void {
+		// Respond with pong containing the original timestamp
+		const pongMsg: Message = {
+			type: MessageType.Pong,
+			timestamp: message.timestamp,
+		};
+		this.transport.send(peerId, encodeMessage(pongMsg), false);
+	}
+
+	/**
+	 * Handle pong message - record RTT for metrics.
+	 */
+	private handlePong(
+		peerId: string,
+		message: Message & { type: MessageType.Pong },
+	): void {
+		// Record the pong for RTT calculation if transport supports metrics
+		if (this.transport.getConnectionMetrics) {
+			// The transport needs to track this - call recordPongReceived if available
+			const transport = this.transport as {
+				recordPongReceived?: (peerId: string, timestamp: number) => void;
+			};
+			transport.recordPongReceived?.(peerId, message.timestamp);
+		}
+	}
+
+	/**
+	 * Send a ping to a peer for RTT measurement.
+	 *
+	 * @param peerId - The peer to ping
+	 */
+	sendPing(peerId: string): void {
+		const timestamp = Date.now();
+		const pingMsg: Message = {
+			type: MessageType.Ping,
+			timestamp,
+		};
+		this.transport.send(peerId, encodeMessage(pingMsg), false);
+
+		// Record the ping for RTT calculation if transport supports metrics
+		const transport = this.transport as {
+			recordPingSent?: (peerId: string, timestamp: number) => void;
+		};
+		transport.recordPingSent?.(peerId, timestamp);
 	}
 
 	/**
@@ -812,11 +987,7 @@ export class Session {
 		// Find the host player
 		for (const player of this._players.values()) {
 			if (player.isHost && player.id !== this.localPlayerId) {
-				this.sendToPeer(
-					player.id as string,
-					message,
-					isReliableMessage(message),
-				);
+				this.sendToPeer(player.id, message, isReliableMessage(message));
 				return;
 			}
 		}

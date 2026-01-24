@@ -28,6 +28,52 @@ import {
 } from "./messages.js";
 
 // =============================================================================
+// Decode Error
+// =============================================================================
+
+/**
+ * Error thrown when decoding a message fails.
+ */
+export class DecodeError extends Error {
+	constructor(
+		message: string,
+		public readonly messageType: number | undefined,
+		public readonly offset: number,
+		public readonly expected: number,
+		public readonly actual: number,
+	) {
+		super(
+			`${message} at offset ${offset}: expected ${expected} bytes, got ${actual}${
+				messageType !== undefined ? ` (message type: ${messageType})` : ""
+			}`,
+		);
+		this.name = "DecodeError";
+	}
+}
+
+/**
+ * Ensure the buffer has enough bytes to read.
+ * @throws DecodeError if insufficient bytes
+ */
+function ensureBytes(
+	view: DataView,
+	offset: number,
+	needed: number,
+	messageType?: number,
+): void {
+	const available = view.byteLength - offset;
+	if (available < needed) {
+		throw new DecodeError(
+			"Insufficient bytes in buffer",
+			messageType,
+			offset,
+			needed,
+			available,
+		);
+	}
+}
+
+// =============================================================================
 // Text Encoder/Decoder (shared instances)
 // =============================================================================
 
@@ -46,8 +92,14 @@ function writeString(view: DataView, offset: number, str: string): number {
 	return 2 + bytes.length;
 }
 
-function readString(view: DataView, offset: number): [string, number] {
+function readString(
+	view: DataView,
+	offset: number,
+	messageType?: number,
+): [string, number] {
+	ensureBytes(view, offset, 2, messageType);
 	const length = view.getUint16(offset);
+	ensureBytes(view, offset + 2, length, messageType);
 	const bytes = new Uint8Array(
 		view.buffer,
 		view.byteOffset + offset + 2,
@@ -63,8 +115,14 @@ function writeBytes(view: DataView, offset: number, data: Uint8Array): number {
 	return 4 + data.length;
 }
 
-function readBytes(view: DataView, offset: number): [Uint8Array, number] {
+function readBytes(
+	view: DataView,
+	offset: number,
+	messageType?: number,
+): [Uint8Array, number] {
+	ensureBytes(view, offset, 4, messageType);
 	const length = view.getUint32(offset);
+	ensureBytes(view, offset + 4, length, messageType);
 	const data = new Uint8Array(length);
 	data.set(new Uint8Array(view.buffer, view.byteOffset + offset + 4, length));
 	return [data, 4 + length];
@@ -114,10 +172,11 @@ export function encodeMessage(message: Message): Uint8Array {
 
 /**
  * Decode a binary message.
+ * @throws DecodeError if the message is malformed or truncated
  */
 export function decodeMessage(data: Uint8Array): Message {
 	if (data.length === 0) {
-		throw new Error("Empty message");
+		throw new DecodeError("Empty message", undefined, 0, 1, 0);
 	}
 
 	const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
@@ -155,7 +214,13 @@ export function decodeMessage(data: Uint8Array): Message {
 		case MessageType.Pong:
 			return decodePongMessage(view);
 		default:
-			throw new Error(`Unknown message type: ${type}`);
+			throw new DecodeError(
+				`Unknown message type: ${type}`,
+				type,
+				0,
+				0,
+				data.length,
+			);
 	}
 }
 
@@ -197,18 +262,23 @@ function encodeInputMessage(msg: InputMessage): Uint8Array {
 }
 
 function decodeInputMessage(view: DataView): InputMessage {
+	const msgType = MessageType.Input;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset);
+	const [playerId, playerIdLen] = readString(view, offset, msgType);
 	offset += playerIdLen;
 
+	ensureBytes(view, offset, 1, msgType);
 	const inputCount = view.getUint8(offset++);
 	const inputs: Array<{ tick: Tick; input: Uint8Array }> = [];
 
 	for (let i = 0; i < inputCount; i++) {
+		ensureBytes(view, offset, 4, msgType);
 		const tick = asTick(view.getInt32(offset));
 		offset += 4;
+		ensureBytes(view, offset, 2, msgType);
 		const inputLen = view.getUint16(offset);
 		offset += 2;
+		ensureBytes(view, offset, inputLen, msgType);
 		const input = new Uint8Array(inputLen);
 		input.set(new Uint8Array(view.buffer, view.byteOffset + offset, inputLen));
 		offset += inputLen;
@@ -241,9 +311,11 @@ function encodeInputAckMessage(msg: InputAckMessage): Uint8Array {
 }
 
 function decodeInputAckMessage(view: DataView): InputAckMessage {
+	const msgType = MessageType.InputAck;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset);
+	const [playerId, playerIdLen] = readString(view, offset, msgType);
 	offset += playerIdLen;
+	ensureBytes(view, offset, 4, msgType);
 	const ackedTick = asTick(view.getInt32(offset));
 
 	return {
@@ -274,11 +346,14 @@ function encodeHashMessage(msg: HashMessage): Uint8Array {
 }
 
 function decodeHashMessage(view: DataView): HashMessage {
+	const msgType = MessageType.Hash;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset);
+	const [playerId, playerIdLen] = readString(view, offset, msgType);
 	offset += playerIdLen;
+	ensureBytes(view, offset, 4, msgType);
 	const tick = asTick(view.getInt32(offset));
 	offset += 4;
+	ensureBytes(view, offset, 4, msgType);
 	const hash = view.getInt32(offset);
 
 	return {
@@ -336,24 +411,33 @@ function encodeSyncMessage(msg: SyncMessage): Uint8Array {
 }
 
 function decodeSyncMessage(view: DataView): SyncMessage {
+	const msgType = MessageType.Sync;
 	let offset = 1;
+	ensureBytes(view, offset, 4, msgType);
 	const tick = asTick(view.getInt32(offset));
 	offset += 4;
+	ensureBytes(view, offset, 4, msgType);
 	const hash = view.getInt32(offset);
 	offset += 4;
-	const [state, stateLen] = readBytes(view, offset);
+	const [state, stateLen] = readBytes(view, offset, msgType);
 	offset += stateLen;
 
+	ensureBytes(view, offset, 2, msgType);
 	const playerCount = view.getUint16(offset);
 	offset += 2;
 	const playerTimeline: SyncMessage["playerTimeline"] = [];
 
 	for (let i = 0; i < playerCount; i++) {
-		const [playerId, idLen] = readString(view, offset);
+		const [playerId, idLen] = readString(view, offset, msgType);
 		offset += idLen;
+		ensureBytes(view, offset, 4, msgType);
 		const joinTick = asTick(view.getInt32(offset));
 		offset += 4;
+		ensureBytes(view, offset, 1, msgType);
 		const hasLeaveTick = view.getUint8(offset++) === 1;
+		if (hasLeaveTick) {
+			ensureBytes(view, offset, 4, msgType);
+		}
 		const leaveTick = hasLeaveTick ? asTick(view.getInt32(offset)) : null;
 		if (hasLeaveTick) offset += 4;
 
@@ -394,11 +478,14 @@ function encodeSyncRequestMessage(msg: SyncRequestMessage): Uint8Array {
 }
 
 function decodeSyncRequestMessage(view: DataView): SyncRequestMessage {
+	const msgType = MessageType.SyncRequest;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset);
+	const [playerId, playerIdLen] = readString(view, offset, msgType);
 	offset += playerIdLen;
+	ensureBytes(view, offset, 4, msgType);
 	const desyncTick = asTick(view.getInt32(offset));
 	offset += 4;
+	ensureBytes(view, offset, 4, msgType);
 	const localHash = view.getInt32(offset);
 
 	return {
@@ -428,9 +515,11 @@ function encodePauseMessage(msg: PauseMessage): Uint8Array {
 }
 
 function decodePauseMessage(view: DataView): PauseMessage {
+	const msgType = MessageType.Pause;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset);
+	const [playerId, playerIdLen] = readString(view, offset, msgType);
 	offset += playerIdLen;
+	ensureBytes(view, offset, 4, msgType);
 	const pauseTick = asTick(view.getInt32(offset));
 
 	return {
@@ -459,9 +548,11 @@ function encodeResumeMessage(msg: ResumeMessage): Uint8Array {
 }
 
 function decodeResumeMessage(view: DataView): ResumeMessage {
+	const msgType = MessageType.Resume;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset);
+	const [playerId, playerIdLen] = readString(view, offset, msgType);
 	offset += playerIdLen;
+	ensureBytes(view, offset, 4, msgType);
 	const resumeTick = asTick(view.getInt32(offset));
 
 	return {
@@ -489,7 +580,8 @@ function encodeJoinRequestMessage(msg: JoinRequestMessage): Uint8Array {
 }
 
 function decodeJoinRequestMessage(view: DataView): JoinRequestMessage {
-	const [playerId] = readString(view, 1);
+	const msgType = MessageType.JoinRequest;
+	const [playerId] = readString(view, 1, msgType);
 	return {
 		type: MessageType.JoinRequest,
 		playerId: asPlayerId(playerId),
@@ -532,19 +624,22 @@ function encodeJoinAcceptMessage(msg: JoinAcceptMessage): Uint8Array {
 }
 
 function decodeJoinAcceptMessage(view: DataView): JoinAcceptMessage {
+	const msgType = MessageType.JoinAccept;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset);
+	const [playerId, playerIdLen] = readString(view, offset, msgType);
 	offset += playerIdLen;
-	const [roomId, roomIdLen] = readString(view, offset);
+	const [roomId, roomIdLen] = readString(view, offset, msgType);
 	offset += roomIdLen;
+	ensureBytes(view, offset, 2, msgType);
 	const tickRate = view.getUint16(offset);
 	offset += 2;
+	ensureBytes(view, offset, 2, msgType);
 	const maxPlayers = view.getUint8(offset++);
 	const playerCount = view.getUint8(offset++);
 
 	const players: PlayerId[] = [];
 	for (let i = 0; i < playerCount; i++) {
-		const [p, pLen] = readString(view, offset);
+		const [p, pLen] = readString(view, offset, msgType);
 		offset += pLen;
 		players.push(asPlayerId(p));
 	}
@@ -580,10 +675,11 @@ function encodeJoinRejectMessage(msg: JoinRejectMessage): Uint8Array {
 }
 
 function decodeJoinRejectMessage(view: DataView): JoinRejectMessage {
+	const msgType = MessageType.JoinReject;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset);
+	const [playerId, playerIdLen] = readString(view, offset, msgType);
 	offset += playerIdLen;
-	const [reason] = readString(view, offset);
+	const [reason] = readString(view, offset, msgType);
 
 	return {
 		type: MessageType.JoinReject,
@@ -638,24 +734,33 @@ function encodeStateSyncMessage(msg: StateSyncMessage): Uint8Array {
 }
 
 function decodeStateSyncMessage(view: DataView): StateSyncMessage {
+	const msgType = MessageType.StateSync;
 	let offset = 1;
+	ensureBytes(view, offset, 4, msgType);
 	const tick = asTick(view.getInt32(offset));
 	offset += 4;
+	ensureBytes(view, offset, 4, msgType);
 	const hash = view.getInt32(offset);
 	offset += 4;
-	const [state, stateLen] = readBytes(view, offset);
+	const [state, stateLen] = readBytes(view, offset, msgType);
 	offset += stateLen;
 
+	ensureBytes(view, offset, 2, msgType);
 	const playerCount = view.getUint16(offset);
 	offset += 2;
 	const playerTimeline: StateSyncMessage["playerTimeline"] = [];
 
 	for (let i = 0; i < playerCount; i++) {
-		const [playerId, idLen] = readString(view, offset);
+		const [playerId, idLen] = readString(view, offset, msgType);
 		offset += idLen;
+		ensureBytes(view, offset, 4, msgType);
 		const joinTick = asTick(view.getInt32(offset));
 		offset += 4;
+		ensureBytes(view, offset, 1, msgType);
 		const hasLeaveTick = view.getUint8(offset++) === 1;
+		if (hasLeaveTick) {
+			ensureBytes(view, offset, 4, msgType);
+		}
 		const leaveTick = hasLeaveTick ? asTick(view.getInt32(offset)) : null;
 		if (hasLeaveTick) offset += 4;
 
@@ -694,9 +799,11 @@ function encodePlayerJoinedMessage(msg: PlayerJoinedMessage): Uint8Array {
 }
 
 function decodePlayerJoinedMessage(view: DataView): PlayerJoinedMessage {
+	const msgType = MessageType.PlayerJoined;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset);
+	const [playerId, playerIdLen] = readString(view, offset, msgType);
 	offset += playerIdLen;
+	ensureBytes(view, offset, 4, msgType);
 	const joinTick = asTick(view.getInt32(offset));
 
 	return {
@@ -725,9 +832,11 @@ function encodePlayerLeftMessage(msg: PlayerLeftMessage): Uint8Array {
 }
 
 function decodePlayerLeftMessage(view: DataView): PlayerLeftMessage {
+	const msgType = MessageType.PlayerLeft;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset);
+	const [playerId, playerIdLen] = readString(view, offset, msgType);
 	offset += playerIdLen;
+	ensureBytes(view, offset, 4, msgType);
 	const leaveTick = asTick(view.getInt32(offset));
 
 	return {
@@ -753,6 +862,8 @@ function encodePingMessage(msg: PingMessage): Uint8Array {
 }
 
 function decodePingMessage(view: DataView): PingMessage {
+	const msgType = MessageType.Ping;
+	ensureBytes(view, 1, 8, msgType);
 	const timestamp = Number(view.getBigUint64(1));
 	return {
 		type: MessageType.Ping,
@@ -776,6 +887,8 @@ function encodePongMessage(msg: PongMessage): Uint8Array {
 }
 
 function decodePongMessage(view: DataView): PongMessage {
+	const msgType = MessageType.Pong;
+	ensureBytes(view, 1, 8, msgType);
 	const timestamp = Number(view.getBigUint64(1));
 	return {
 		type: MessageType.Pong,

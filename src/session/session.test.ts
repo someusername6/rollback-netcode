@@ -1,11 +1,11 @@
-import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert";
-import { Session, createSession } from "./session.js";
+import { beforeEach, describe, it } from "node:test";
 import {
 	LocalTransport,
 	createLocalTransportGroup,
 } from "../transport/local.js";
 import { type Game, type PlayerId, asPlayerId, asTick } from "../types.js";
+import { type Session, createSession } from "./session.js";
 
 /**
  * Simple test game that tracks position.
@@ -404,9 +404,9 @@ describe("Session", () => {
 
 			// Run 5 ticks
 			for (let i = 0; i < 5; i++) {
-				sessions.get("p1")!.tick(new Uint8Array([138, 128])); // +10 x
-				sessions.get("p2")!.tick(new Uint8Array([128, 138])); // +10 y
-				sessions.get("p3")!.tick(new Uint8Array([128, 128])); // no movement
+				sessions.get("p1")?.tick(new Uint8Array([138, 128])); // +10 x
+				sessions.get("p2")?.tick(new Uint8Array([128, 138])); // +10 y
+				sessions.get("p3")?.tick(new Uint8Array([128, 128])); // no movement
 
 				flushAll();
 			}

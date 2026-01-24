@@ -13,9 +13,12 @@ import type {
 	Tick,
 	TickResult,
 } from "../types.js";
-import { DEFAULT_INPUT_PREDICTOR, asTick } from "../types.js";
+import { DEFAULT_INPUT_PREDICTOR, RollbackError, asTick } from "../types.js";
 import { InputBuffer } from "./input-buffer.js";
 import { SnapshotBuffer } from "./snapshot-buffer.js";
+
+/** Number of ticks to keep before the confirmed tick when pruning */
+const PRUNE_BUFFER_TICKS = 10;
 
 /**
  * Configuration for the rollback engine.
@@ -212,17 +215,27 @@ export class RollbackEngine {
 		const tickResult = this._currentTick;
 		this._currentTick = asTick(this._currentTick + 1);
 
-		return {
+		const result: TickResult = {
 			tick: tickResult,
 			rolledBack: rollbackResult.rolledBack,
-			rollbackTicks: rollbackResult.rollbackTicks,
 		};
+		if (rollbackResult.rollbackTicks !== undefined) {
+			result.rollbackTicks = rollbackResult.rollbackTicks;
+		}
+		if (rollbackResult.error !== undefined) {
+			result.error = rollbackResult.error;
+		}
+		return result;
 	}
 
 	/**
 	 * Check for mispredictions and rollback if found.
 	 */
-	private checkAndRollback(): { rolledBack: boolean; rollbackTicks?: number } {
+	private checkAndRollback(): {
+		rolledBack: boolean;
+		rollbackTicks?: number;
+		error?: RollbackError;
+	} {
 		// Find the earliest misprediction across all remote players
 		let earliestMisprediction: Tick | undefined;
 
@@ -258,10 +271,13 @@ export class RollbackEngine {
 		if (!snapshot) {
 			// Can't rollback - snapshot not available
 			// This shouldn't happen if snapshotHistorySize is large enough
-			console.warn(
-				`Cannot rollback to tick ${restoreTick}: snapshot not available`,
-			);
-			return { rolledBack: false };
+			return {
+				rolledBack: false,
+				error: new RollbackError(
+					`Cannot rollback to tick ${restoreTick}: snapshot not available`,
+					restoreTick,
+				),
+			};
 		}
 
 		// Restore game state
@@ -333,7 +349,7 @@ export class RollbackEngine {
 			this._confirmedTick = minConfirmed;
 
 			// Prune old data
-			const pruneBelow = asTick(this._confirmedTick - 10); // Keep some buffer
+			const pruneBelow = asTick(this._confirmedTick - PRUNE_BUFFER_TICKS);
 			if (pruneBelow > 0) {
 				this.inputBuffer.pruneBeforeTick(pruneBelow);
 				this.snapshotBuffer.pruneBeforeTick(pruneBelow);

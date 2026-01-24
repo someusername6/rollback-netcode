@@ -43,12 +43,23 @@
 export { createSession, Session } from "./session/session.js";
 export type { CreateSessionOptions } from "./session/session.js";
 
+// Topology strategies
+export {
+	StarTopology,
+	MeshTopology,
+	createTopologyStrategy,
+} from "./session/topology.js";
+export type { TopologyStrategy } from "./session/topology.js";
+
 // Rollback engine (for advanced use cases)
 export { RollbackEngine } from "./rollback/engine.js";
 export type { RollbackEngineConfig } from "./rollback/engine.js";
 
 // Transport adapters
-export type { TransportAdapter } from "./transport/adapter.js";
+export type {
+	ConnectionMetrics,
+	TransportAdapter,
+} from "./transport/adapter.js";
 export {
 	LocalTransport,
 	createLocalTransportGroup,
@@ -61,7 +72,11 @@ export type {
 } from "./transport/webrtc.js";
 
 // Protocol encoding (for custom transport implementations)
-export { encodeMessage, decodeMessage } from "./protocol/encoding.js";
+export {
+	encodeMessage,
+	decodeMessage,
+	DecodeError,
+} from "./protocol/encoding.js";
 export { MessageType } from "./protocol/messages.js";
 export type { Message } from "./protocol/messages.js";
 
@@ -78,6 +93,8 @@ export type {
 	InputPredictor,
 	Snapshot,
 	PlayerTimeline,
+	ErrorContext,
+	ErrorSource,
 } from "./types.js";
 
 export {
@@ -85,4 +102,24 @@ export {
 	asTick,
 	DEFAULT_SESSION_CONFIG,
 	DEFAULT_INPUT_PREDICTOR,
+	MAX_PLAYERS_LIMIT,
+	RollbackError,
+	ValidationError,
+	validateSessionConfig,
 } from "./types.js";
+
+// Test utilities (for library consumers writing tests)
+export {
+	TestGame,
+	createTestSession,
+	createTestInput,
+	flushAllTransports,
+} from "./test-utils.js";
+export type {
+	CreateTestSessionOptions,
+	TestSessionResult,
+} from "./test-utils.js";
+
+// Debug utilities
+export { createDebugLogger, noopLogger } from "./debug.js";
+export type { DebugLogger } from "./debug.js";

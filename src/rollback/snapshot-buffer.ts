@@ -13,9 +13,11 @@ import { asTick } from "../types.js";
  *
  * Snapshots are stored at specific ticks and can be retrieved by tick.
  * When the buffer is full, the oldest snapshot is evicted.
+ * Uses a tick-to-index map for O(1) lookup performance.
  */
 export class SnapshotBuffer {
 	private readonly buffer: (Snapshot | undefined)[];
+	private readonly tickToIndex: Map<Tick, number> = new Map();
 	private head = 0; // Next write position
 	private count = 0;
 	private _oldestTick: Tick | undefined;
@@ -77,8 +79,15 @@ export class SnapshotBuffer {
 
 		// If buffer is full, we're overwriting the oldest
 		if (this.count === this.capacity) {
+			// Remove old tick from index map
+			const oldSnapshot = this.buffer[this.head];
+			if (oldSnapshot) {
+				this.tickToIndex.delete(oldSnapshot.tick);
+			}
+
 			// The slot at head contains the oldest snapshot
 			this.buffer[this.head] = snapshot;
+			this.tickToIndex.set(tick, this.head);
 			this.head = (this.head + 1) % this.capacity;
 			// Update oldest tick to the new oldest
 			const oldestSnapshot = this.buffer[this.head];
@@ -87,6 +96,7 @@ export class SnapshotBuffer {
 			// Buffer not full, just append
 			const writePos = (this.head + this.count) % this.capacity;
 			this.buffer[writePos] = snapshot;
+			this.tickToIndex.set(tick, writePos);
 			this.count++;
 			if (this.count === 1) {
 				this._oldestTick = tick;
@@ -98,25 +108,17 @@ export class SnapshotBuffer {
 
 	/**
 	 * Get a snapshot at a specific tick.
+	 * Uses O(1) map lookup for performance.
 	 *
 	 * @param tick - The tick to retrieve
 	 * @returns The snapshot at that tick, or undefined if not found
 	 */
 	get(tick: Tick): Snapshot | undefined {
-		if (this.count === 0) {
+		const idx = this.tickToIndex.get(tick);
+		if (idx === undefined) {
 			return undefined;
 		}
-
-		// Search for the snapshot with matching tick
-		for (let i = 0; i < this.count; i++) {
-			const idx = (this.head + i) % this.capacity;
-			const snapshot = this.buffer[idx];
-			if (snapshot?.tick === tick) {
-				return snapshot;
-			}
-		}
-
-		return undefined;
+		return this.buffer[idx];
 	}
 
 	/**
@@ -149,6 +151,7 @@ export class SnapshotBuffer {
 	 */
 	clear(): void {
 		this.buffer.fill(undefined);
+		this.tickToIndex.clear();
 		this.head = 0;
 		this.count = 0;
 		this._oldestTick = undefined;
@@ -192,6 +195,8 @@ export class SnapshotBuffer {
 		while (this.count > 0) {
 			const oldest = this.buffer[this.head];
 			if (oldest && oldest.tick < tick) {
+				// Remove from index map
+				this.tickToIndex.delete(oldest.tick);
 				this.buffer[this.head] = undefined;
 				this.head = (this.head + 1) % this.capacity;
 				this.count--;

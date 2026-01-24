@@ -1,7 +1,7 @@
-import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert";
-import { RollbackEngine } from "./engine.js";
+import { beforeEach, describe, it } from "node:test";
 import { type Game, type PlayerId, asPlayerId, asTick } from "../types.js";
+import { RollbackEngine } from "./engine.js";
 
 /**
  * Simple test game that tracks position.

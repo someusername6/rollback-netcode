@@ -250,8 +250,10 @@ export class LocalTransport implements TransportAdapter {
 	 */
 	flush(): void {
 		while (this.pendingMessages.length > 0) {
-			const pending = this.pendingMessages.shift()!;
-			this.deliverMessage(pending);
+			const pending = this.pendingMessages.shift();
+			if (pending !== undefined) {
+				this.deliverMessage(pending);
+			}
 		}
 	}
 
@@ -291,12 +293,13 @@ export class LocalTransport implements TransportAdapter {
 	 * Deliver all messages that are due based on current time.
 	 */
 	private deliverDueMessages(): void {
-		while (
-			this.pendingMessages.length > 0 &&
-			this.pendingMessages[0]!.deliverAt <= this.currentTime
-		) {
-			const pending = this.pendingMessages.shift()!;
-			this.deliverMessage(pending);
+		while (this.pendingMessages.length > 0) {
+			const first = this.pendingMessages[0];
+			if (first === undefined || first.deliverAt > this.currentTime) {
+				break;
+			}
+			this.pendingMessages.shift();
+			this.deliverMessage(first);
 		}
 	}
 
@@ -305,7 +308,7 @@ export class LocalTransport implements TransportAdapter {
 	 */
 	private deliverMessage(pending: PendingMessage): void {
 		const peer = this.linkedTransports.get(pending.targetPeerId);
-		if (peer && peer._connectedPeers.has(this.localPeerId)) {
+		if (peer?._connectedPeers.has(this.localPeerId)) {
 			peer.onMessage?.(this.localPeerId, pending.message);
 		}
 	}

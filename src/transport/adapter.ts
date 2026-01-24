@@ -6,6 +6,23 @@
  */
 
 /**
+ * Connection quality metrics for a peer.
+ */
+export interface ConnectionMetrics {
+	/** Round-trip time in milliseconds */
+	rtt: number;
+
+	/** RTT variance (jitter) in milliseconds */
+	jitter: number;
+
+	/** Estimated packet loss rate (0-1) */
+	packetLoss: number;
+
+	/** Timestamp when metrics were last updated */
+	lastUpdated: number;
+}
+
+/**
  * Interface that all transport implementations must follow.
  */
 export interface TransportAdapter {
@@ -70,4 +87,12 @@ export interface TransportAdapter {
 	 * The local peer's ID.
 	 */
 	readonly localPeerId: string;
+
+	/**
+	 * Get connection quality metrics for a peer.
+	 *
+	 * @param peerId - The peer's ID
+	 * @returns Connection metrics or null if not available
+	 */
+	getConnectionMetrics?(peerId: string): ConnectionMetrics | null;
 }

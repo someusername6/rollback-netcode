@@ -1,5 +1,5 @@
-import { describe, it } from "node:test";
 import assert from "node:assert";
+import { describe, it } from "node:test";
 import { LocalTransport, createLocalTransportGroup } from "./local.js";
 
 describe("LocalTransport", () => {
@@ -328,7 +328,7 @@ describe("LocalTransport", () => {
 			for (const [peerId, transport] of transports) {
 				received.set(peerId, []);
 				transport.onMessage = (fromPeerId, msg) => {
-					received.get(peerId)!.push(msg[0]!);
+					received.get(peerId)?.push(msg[0]!);
 				};
 			}
 
@@ -347,7 +347,7 @@ describe("LocalTransport", () => {
 			p1.flush();
 
 			// Others should receive
-			assert.strictEqual(received.get("p1")!.length, 0);
+			assert.strictEqual(received.get("p1")?.length, 0);
 			assert.deepStrictEqual(received.get("p2"), [42]);
 			assert.deepStrictEqual(received.get("p3"), [42]);
 			assert.deepStrictEqual(received.get("p4"), [42]);
@@ -450,7 +450,7 @@ describe("LocalTransport", () => {
 			t1.flush();
 
 			assert.strictEqual(received.length, 1);
-			assert.strictEqual(received[0]!.length, 0);
+			assert.strictEqual(received[0]?.length, 0);
 		});
 	});
 });

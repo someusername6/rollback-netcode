@@ -121,6 +121,12 @@ export interface SessionConfig {
 	 * @default 5000
 	 */
 	disconnectTimeout: number;
+
+	/**
+	 * Enable debug logging for troubleshooting.
+	 * @default false
+	 */
+	debug: boolean;
 }
 
 /**
@@ -134,7 +140,65 @@ export const DEFAULT_SESSION_CONFIG: SessionConfig = {
 	maxSpeculationTicks: 60,
 	hashInterval: 60,
 	disconnectTimeout: 5000,
+	debug: false,
 };
+
+/** Maximum allowed players in a session */
+export const MAX_PLAYERS_LIMIT = 16;
+
+/**
+ * Validate session configuration values.
+ * @throws ValidationError if any values are invalid
+ */
+export function validateSessionConfig(config: SessionConfig): void {
+	if (config.tickRate <= 0) {
+		throw new ValidationError(
+			"tickRate must be greater than 0",
+			"tickRate",
+			config.tickRate,
+		);
+	}
+
+	if (config.maxPlayers < 1 || config.maxPlayers > MAX_PLAYERS_LIMIT) {
+		throw new ValidationError(
+			`maxPlayers must be between 1 and ${MAX_PLAYERS_LIMIT}`,
+			"maxPlayers",
+			config.maxPlayers,
+		);
+	}
+
+	if (config.snapshotHistorySize < config.maxSpeculationTicks) {
+		throw new ValidationError(
+			"snapshotHistorySize must be >= maxSpeculationTicks to support rollback",
+			"snapshotHistorySize",
+			config.snapshotHistorySize,
+		);
+	}
+
+	if (config.hashInterval <= 0) {
+		throw new ValidationError(
+			"hashInterval must be greater than 0",
+			"hashInterval",
+			config.hashInterval,
+		);
+	}
+
+	if (config.disconnectTimeout <= 0) {
+		throw new ValidationError(
+			"disconnectTimeout must be greater than 0",
+			"disconnectTimeout",
+			config.disconnectTimeout,
+		);
+	}
+
+	if (config.topology !== "mesh" && config.topology !== "star") {
+		throw new ValidationError(
+			"topology must be 'mesh' or 'star'",
+			"topology",
+			config.topology,
+		);
+	}
+}
 
 // =============================================================================
 // Session State
@@ -255,6 +319,58 @@ export interface TickResult {
 
 	/** Number of ticks that were resimulated (if rollback occurred) */
 	rollbackTicks?: number;
+
+	/** Error that occurred during the tick (if any) */
+	error?: RollbackError;
+}
+
+// =============================================================================
+// Errors
+// =============================================================================
+
+/**
+ * Source of an error in the rollback netcode system.
+ */
+export type ErrorSource = "engine" | "transport" | "protocol" | "session";
+
+/**
+ * Context information for an error event.
+ */
+export interface ErrorContext {
+	/** The source component where the error occurred */
+	source: ErrorSource;
+	/** Whether the error is recoverable (non-fatal) */
+	recoverable: boolean;
+	/** Additional details about the error */
+	details?: Record<string, unknown>;
+}
+
+/**
+ * Error thrown when a rollback operation fails.
+ */
+export class RollbackError extends Error {
+	constructor(
+		message: string,
+		public readonly tick: Tick,
+		originalError?: Error,
+	) {
+		super(message, { cause: originalError });
+		this.name = "RollbackError";
+	}
+}
+
+/**
+ * Error thrown when session validation fails.
+ */
+export class ValidationError extends Error {
+	constructor(
+		message: string,
+		public readonly field: string,
+		public readonly value: unknown,
+	) {
+		super(message);
+		this.name = "ValidationError";
+	}
 }
 
 // =============================================================================
@@ -280,8 +396,8 @@ export interface SessionEvents {
 	/** Fired when the game starts */
 	gameStart: () => void;
 
-	/** Fired on errors */
-	error: (error: Error) => void;
+	/** Fired on errors with context */
+	error: (error: Error, context: ErrorContext) => void;
 }
 
 /**

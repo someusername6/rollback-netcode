@@ -1,8 +1,8 @@
-import { describe, it } from "node:test";
 import assert from "node:assert";
-import { decodeMessage, encodeMessage } from "./encoding.js";
-import { MessageType } from "./messages.js";
+import { describe, it } from "node:test";
 import { asPlayerId, asTick } from "../types.js";
+import { DecodeError, decodeMessage, encodeMessage } from "./encoding.js";
+import { MessageType } from "./messages.js";
 
 describe("Message Encoding/Decoding", () => {
 	describe("InputMessage", () => {
@@ -374,6 +374,278 @@ describe("Message Encoding/Decoding", () => {
 			assert.throws(() => {
 				decodeMessage(new Uint8Array([0xff]));
 			}, /Unknown message type/);
+		});
+	});
+
+	describe("DecodeError", () => {
+		it("should include message type in error message when provided", () => {
+			const error = new DecodeError("Test error", MessageType.Input, 10, 20, 5);
+			assert.ok(error.message.includes(`message type: ${MessageType.Input}`));
+			assert.strictEqual(error.messageType, MessageType.Input);
+			assert.strictEqual(error.offset, 10);
+			assert.strictEqual(error.expected, 20);
+			assert.strictEqual(error.actual, 5);
+			assert.strictEqual(error.name, "DecodeError");
+		});
+
+		it("should handle undefined message type", () => {
+			const error = new DecodeError("Test error", undefined, 0, 10, 5);
+			assert.ok(!error.message.includes("message type:"));
+		});
+	});
+
+	describe("bounds checking - truncated packets", () => {
+		it("should throw DecodeError for empty packet", () => {
+			assert.throws(
+				() => decodeMessage(new Uint8Array(0)),
+				(error: unknown) => {
+					assert.ok(error instanceof DecodeError);
+					assert.strictEqual(error.offset, 0);
+					assert.strictEqual(error.expected, 1);
+					assert.strictEqual(error.actual, 0);
+					return true;
+				},
+			);
+		});
+
+		it("should throw DecodeError for invalid message type", () => {
+			assert.throws(
+				() => decodeMessage(new Uint8Array([255])),
+				(error: unknown) => {
+					assert.ok(error instanceof DecodeError);
+					assert.ok(error.message.includes("Unknown message type: 255"));
+					return true;
+				},
+			);
+		});
+
+		it("should throw DecodeError when Input message truncated mid-playerId", () => {
+			// Message type + start of playerId length but no content
+			const encoded = new Uint8Array([MessageType.Input, 0, 10]); // Says playerId is 10 chars but buffer ends
+			assert.throws(
+				() => decodeMessage(encoded),
+				(error: unknown) => {
+					assert.ok(error instanceof DecodeError);
+					assert.ok(error.messageType === MessageType.Input);
+					return true;
+				},
+			);
+		});
+
+		it("should throw DecodeError when Input message truncated at input count", () => {
+			// Valid playerId but no input count byte
+			const encoded = new Uint8Array([MessageType.Input, 0, 2, 0x70, 0x31]); // "p1" but no input count
+			assert.throws(
+				() => decodeMessage(encoded),
+				(error: unknown) => {
+					assert.ok(error instanceof DecodeError);
+					return true;
+				},
+			);
+		});
+
+		it("should throw DecodeError when InputAck truncated before tick", () => {
+			const encoded = new Uint8Array([MessageType.InputAck, 0, 2, 0x70, 0x31]); // "p1" but no tick
+			assert.throws(
+				() => decodeMessage(encoded),
+				(error: unknown) => {
+					assert.ok(error instanceof DecodeError);
+					return true;
+				},
+			);
+		});
+
+		it("should throw DecodeError when Hash message truncated", () => {
+			const encoded = new Uint8Array([
+				MessageType.Hash,
+				0,
+				2,
+				0x70,
+				0x31, // "p1"
+				0,
+				0,
+				0,
+				10, // tick
+				// missing hash
+			]);
+			assert.throws(
+				() => decodeMessage(encoded),
+				(error: unknown) => {
+					assert.ok(error instanceof DecodeError);
+					return true;
+				},
+			);
+		});
+
+		it("should throw DecodeError when Ping message truncated", () => {
+			const encoded = new Uint8Array([MessageType.Ping, 0, 0, 0]); // Only 4 bytes instead of 8
+			assert.throws(
+				() => decodeMessage(encoded),
+				(error: unknown) => {
+					assert.ok(error instanceof DecodeError);
+					return true;
+				},
+			);
+		});
+
+		it("should throw DecodeError when Pong message truncated", () => {
+			const encoded = new Uint8Array([MessageType.Pong, 0, 0]); // Only 3 bytes instead of 8
+			assert.throws(
+				() => decodeMessage(encoded),
+				(error: unknown) => {
+					assert.ok(error instanceof DecodeError);
+					return true;
+				},
+			);
+		});
+
+		it("should throw DecodeError when Sync message state is truncated", () => {
+			const encoded = new Uint8Array([
+				MessageType.Sync,
+				0,
+				0,
+				0,
+				0, // tick
+				0,
+				0,
+				0,
+				0, // hash
+				0,
+				0,
+				0,
+				100, // state length says 100 bytes
+				1,
+				2,
+				3, // but only 3 bytes of state
+			]);
+			assert.throws(
+				() => decodeMessage(encoded),
+				(error: unknown) => {
+					assert.ok(error instanceof DecodeError);
+					return true;
+				},
+			);
+		});
+
+		it("should throw DecodeError when JoinAccept player list is truncated", () => {
+			const encoded = new Uint8Array([
+				MessageType.JoinAccept,
+				0,
+				2,
+				0x70,
+				0x31, // playerId "p1"
+				0,
+				4,
+				0x72,
+				0x6f,
+				0x6f,
+				0x6d, // roomId "room"
+				0,
+				60, // tickRate
+				4, // maxPlayers
+				5, // playerCount says 5 players
+				// but no player data
+			]);
+			assert.throws(
+				() => decodeMessage(encoded),
+				(error: unknown) => {
+					assert.ok(error instanceof DecodeError);
+					return true;
+				},
+			);
+		});
+	});
+
+	describe("boundary values", () => {
+		it("should handle tick value 0", () => {
+			const message = {
+				type: MessageType.Hash as const,
+				playerId: asPlayerId("p"),
+				tick: asTick(0),
+				hash: 0,
+			};
+
+			const encoded = encodeMessage(message);
+			const decoded = decodeMessage(encoded);
+
+			assert.strictEqual(decoded.type, MessageType.Hash);
+			if (decoded.type === MessageType.Hash) {
+				assert.strictEqual(decoded.tick, 0);
+				assert.strictEqual(decoded.hash, 0);
+			}
+		});
+
+		it("should handle maximum int32 tick value", () => {
+			const message = {
+				type: MessageType.Hash as const,
+				playerId: asPlayerId("p"),
+				tick: asTick(2147483647),
+				hash: 2147483647,
+			};
+
+			const encoded = encodeMessage(message);
+			const decoded = decodeMessage(encoded);
+
+			assert.deepStrictEqual(decoded, message);
+		});
+
+		it("should handle unicode player IDs", () => {
+			const message = {
+				type: MessageType.JoinRequest as const,
+				playerId: asPlayerId("プレイヤー1"),
+			};
+
+			const encoded = encodeMessage(message);
+			const decoded = decodeMessage(encoded);
+
+			assert.deepStrictEqual(decoded, message);
+		});
+
+		it("should handle empty string player ID", () => {
+			const message = {
+				type: MessageType.JoinRequest as const,
+				playerId: asPlayerId(""),
+			};
+
+			const encoded = encodeMessage(message);
+			const decoded = decodeMessage(encoded);
+
+			assert.deepStrictEqual(decoded, message);
+		});
+
+		it("should handle large state in Sync message", () => {
+			const largeState = new Uint8Array(10000);
+			for (let i = 0; i < largeState.length; i++) {
+				largeState[i] = i % 256;
+			}
+
+			const message = {
+				type: MessageType.Sync as const,
+				tick: asTick(100),
+				hash: 999,
+				state: largeState,
+				playerTimeline: [],
+			};
+
+			const encoded = encodeMessage(message);
+			const decoded = decodeMessage(encoded);
+
+			assert.strictEqual(decoded.type, MessageType.Sync);
+			if (decoded.type === MessageType.Sync) {
+				assert.deepStrictEqual(decoded.state, largeState);
+			}
+		});
+
+		it("should handle large timestamp in Ping", () => {
+			const message = {
+				type: MessageType.Ping as const,
+				timestamp: Number.MAX_SAFE_INTEGER,
+			};
+
+			const encoded = encodeMessage(message);
+			const decoded = decodeMessage(encoded);
+
+			assert.deepStrictEqual(decoded, message);
 		});
 	});
 });
