@@ -1,0 +1,36 @@
+{
+  "name": "rollback-netcode",
+  "version": "0.0.1",
+  "description": "P2P rollback netcode library for browser-based multiplayer games",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test --experimental-strip-types src/**/*.test.ts",
+    "lint": "biome check src/",
+    "format": "biome format --write src/"
+  },
+  "keywords": [
+    "netcode",
+    "rollback",
+    "multiplayer",
+    "webrtc",
+    "p2p",
+    "game",
+    "networking",
+    "ggpo"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
