@@ -34,6 +34,9 @@ const DEFAULT_KEEPALIVE_INTERVAL_MS = 5000;
 /** Maximum time without response before considering peer dead (in ms) */
 const DEFAULT_KEEPALIVE_TIMEOUT_MS = 15000;
 
+/** Default timeout for connection establishment (in ms) */
+const DEFAULT_CONNECTION_TIMEOUT_MS = 30000;
+
 /**
  * Configuration for the WebRTC transport.
  */
@@ -58,6 +61,9 @@ export interface WebRTCTransportConfig {
 
 	/** Time without response before considering peer dead (default: 15000ms) */
 	keepaliveTimeout?: number;
+
+	/** Timeout for connection establishment (default: 30000ms) */
+	connectionTimeout?: number;
 }
 
 /**
@@ -105,6 +111,9 @@ interface PeerConnection {
 
 	/** Rejector for connection promise */
 	connectionReject: ((error: Error) => void) | null;
+
+	/** Connection timeout timer */
+	connectionTimer: ReturnType<typeof setTimeout> | null;
 }
 
 /**
@@ -171,6 +180,7 @@ export class WebRTCTransport implements TransportAdapter {
 	private readonly reconnectDelay: number;
 	private readonly keepaliveInterval: number;
 	private readonly keepaliveTimeout: number;
+	private readonly connectionTimeout: number;
 
 	private readonly peers: Map<string, PeerConnection> = new Map();
 	private readonly _connectedPeers: Set<string> = new Set();
@@ -207,6 +217,8 @@ export class WebRTCTransport implements TransportAdapter {
 			config.keepaliveInterval ?? DEFAULT_KEEPALIVE_INTERVAL_MS;
 		this.keepaliveTimeout =
 			config.keepaliveTimeout ?? DEFAULT_KEEPALIVE_TIMEOUT_MS;
+		this.connectionTimeout =
+			config.connectionTimeout ?? DEFAULT_CONNECTION_TIMEOUT_MS;
 
 		// Start keepalive timer if enabled
 		if (this.keepaliveInterval > 0) {
@@ -251,6 +263,21 @@ export class WebRTCTransport implements TransportAdapter {
 		peer.connectionPromise = new Promise((resolve, reject) => {
 			peer.connectionResolve = resolve;
 			peer.connectionReject = reject;
+
+			// Set connection timeout
+			if (this.connectionTimeout > 0) {
+				peer.connectionTimer = setTimeout(() => {
+					if (!peer.isConnected && peer.connectionReject) {
+						peer.connectionReject(
+							new Error(`Connection to ${peerId} timed out`),
+						);
+						peer.connectionResolve = null;
+						peer.connectionReject = null;
+						peer.connectionTimer = null;
+						this.cleanupPeer(peerId, peer);
+					}
+				}, this.connectionTimeout);
+			}
 		});
 
 		await this.createOffer(peerId);
@@ -452,6 +479,7 @@ export class WebRTCTransport implements TransportAdapter {
 			connectionPromise: null,
 			connectionResolve: null,
 			connectionReject: null,
+			connectionTimer: null,
 		};
 
 		this.setupPeerConnection(peerId, peer);
@@ -558,6 +586,12 @@ export class WebRTCTransport implements TransportAdapter {
 			peer.reconnectAttempts = 0;
 			this._connectedPeers.add(peerId);
 
+			// Clear connection timeout
+			if (peer.connectionTimer) {
+				clearTimeout(peer.connectionTimer);
+				peer.connectionTimer = null;
+			}
+
 			// Resolve connection promise
 			if (peer.connectionResolve) {
 				peer.connectionResolve();
@@ -662,6 +696,12 @@ export class WebRTCTransport implements TransportAdapter {
 	private cleanupPeer(peerId: string, peer: PeerConnection): void {
 		const wasConnected = peer.isConnected;
 
+		// Clear connection timeout
+		if (peer.connectionTimer) {
+			clearTimeout(peer.connectionTimer);
+			peer.connectionTimer = null;
+		}
+
 		peer.reliableChannel?.close();
 		peer.unreliableChannel?.close();
 		peer.connection.close();
@@ -727,7 +767,8 @@ export class WebRTCTransport implements TransportAdapter {
 		const sentAt = metrics.pendingPings.get(timestamp);
 
 		if (sentAt !== undefined) {
-			const rtt = Date.now() - sentAt;
+			// Clamp RTT to non-negative (can be negative with clock skew)
+			const rtt = Math.max(0, Date.now() - sentAt);
 			this.updateRttMetrics(metrics, rtt);
 			metrics.pendingPings.delete(timestamp);
 		}

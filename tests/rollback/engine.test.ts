@@ -587,4 +587,176 @@ describe("RollbackEngine", () => {
 			assert.strictEqual(game.x, 60);
 		});
 	});
+
+	describe("game callback error handling", () => {
+		/**
+		 * Game that throws errors on specific callbacks.
+		 */
+		class ThrowingGame implements Game {
+			x = 0;
+			throwOnStep = false;
+			throwOnSerialize = false;
+			throwOnDeserialize = false;
+			throwOnHash = false;
+
+			serialize(): Uint8Array {
+				if (this.throwOnSerialize) {
+					throw new Error("serialize error");
+				}
+				const buffer = new ArrayBuffer(4);
+				new DataView(buffer).setInt32(0, this.x);
+				return new Uint8Array(buffer);
+			}
+
+			deserialize(data: Uint8Array): void {
+				if (this.throwOnDeserialize) {
+					throw new Error("deserialize error");
+				}
+				this.x = new DataView(data.buffer, data.byteOffset).getInt32(0);
+			}
+
+			step(inputs: Map<PlayerId, Uint8Array>): void {
+				if (this.throwOnStep) {
+					throw new Error("step error");
+				}
+				for (const [, input] of inputs) {
+					if (input.length >= 1) {
+						this.x += (input[0] ?? 0) - 128;
+					}
+				}
+			}
+
+			hash(): number {
+				if (this.throwOnHash) {
+					throw new Error("hash error");
+				}
+				return this.x;
+			}
+		}
+
+		it("should propagate error when game.step() throws", () => {
+			const throwingGame = new ThrowingGame();
+			const throwingEngine = new RollbackEngine({
+				game: throwingGame,
+				localPlayerId: localPlayer,
+			});
+
+			throwingEngine.setLocalInput(asTick(0), new Uint8Array([138]));
+			throwingGame.throwOnStep = true;
+
+			// BUG: Currently the error propagates uncaught
+			// After fix, should either catch and emit error event, or wrap in GameError
+			assert.throws(
+				() => throwingEngine.tick(),
+				/step error/,
+				"game.step() error should propagate (current behavior)",
+			);
+		});
+
+		it("should propagate error when game.serialize() throws", () => {
+			const throwingGame = new ThrowingGame();
+			const throwingEngine = new RollbackEngine({
+				game: throwingGame,
+				localPlayerId: localPlayer,
+			});
+
+			throwingEngine.setLocalInput(asTick(0), new Uint8Array([138]));
+			throwingGame.throwOnSerialize = true;
+
+			// BUG: Currently the error propagates uncaught
+			assert.throws(
+				() => throwingEngine.tick(),
+				/serialize error/,
+				"game.serialize() error should propagate (current behavior)",
+			);
+		});
+
+		it("should propagate error when game.hash() throws", () => {
+			const throwingGame = new ThrowingGame();
+			const throwingEngine = new RollbackEngine({
+				game: throwingGame,
+				localPlayerId: localPlayer,
+			});
+
+			throwingEngine.setLocalInput(asTick(0), new Uint8Array([138]));
+			throwingGame.throwOnHash = true;
+
+			// BUG: Currently the error propagates uncaught
+			assert.throws(
+				() => throwingEngine.tick(),
+				/hash error/,
+				"game.hash() error should propagate (current behavior)",
+			);
+		});
+
+		it("should propagate error when game.deserialize() throws during rollback", () => {
+			const throwingGame = new ThrowingGame();
+			const throwingEngine = new RollbackEngine({
+				game: throwingGame,
+				localPlayerId: localPlayer,
+			});
+
+			const remote = asPlayerId("remote");
+			throwingEngine.addPlayer(remote, asTick(0));
+
+			// Advance a tick successfully
+			throwingEngine.setLocalInput(asTick(0), new Uint8Array([128]));
+			throwingEngine.receiveRemoteInput(remote, asTick(0), new Uint8Array([128]));
+			throwingEngine.tick();
+
+			// Run ahead with predictions
+			throwingEngine.setLocalInput(asTick(1), new Uint8Array([128]));
+			throwingEngine.tick();
+
+			// Receive different remote input (triggers rollback)
+			throwingEngine.receiveRemoteInput(remote, asTick(1), new Uint8Array([138]));
+
+			// Enable throwing on deserialize - will throw during rollback
+			throwingGame.throwOnDeserialize = true;
+
+			throwingEngine.setLocalInput(asTick(2), new Uint8Array([128]));
+
+			// BUG: Currently the error propagates uncaught during rollback
+			assert.throws(
+				() => throwingEngine.tick(),
+				/deserialize error/,
+				"game.deserialize() error should propagate (current behavior)",
+			);
+		});
+
+		it("should propagate error when game.step() throws during resimulation", () => {
+			const throwingGame = new ThrowingGame();
+			const throwingEngine = new RollbackEngine({
+				game: throwingGame,
+				localPlayerId: localPlayer,
+			});
+
+			const remote = asPlayerId("remote");
+			throwingEngine.addPlayer(remote, asTick(0));
+
+			// Advance a tick successfully
+			throwingEngine.setLocalInput(asTick(0), new Uint8Array([128]));
+			throwingEngine.receiveRemoteInput(remote, asTick(0), new Uint8Array([128]));
+			throwingEngine.tick();
+
+			// Run ahead with predictions
+			throwingEngine.setLocalInput(asTick(1), new Uint8Array([128]));
+			throwingEngine.tick();
+
+			// Receive different remote input (triggers rollback)
+			throwingEngine.receiveRemoteInput(remote, asTick(1), new Uint8Array([138]));
+
+			// Enable throwing on step - will throw during resimulation
+			throwingGame.throwOnStep = true;
+
+			throwingEngine.setLocalInput(asTick(2), new Uint8Array([128]));
+
+			// BUG: Currently the error propagates uncaught during resimulation
+			assert.throws(
+				() => throwingEngine.tick(),
+				/step error/,
+				"game.step() error during resimulation should propagate (current behavior)",
+			);
+		});
+	});
 });

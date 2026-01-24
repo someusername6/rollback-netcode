@@ -577,4 +577,101 @@ describe("Session", () => {
 			assert.strictEqual(clientGame.x, hostGame.x);
 		});
 	});
+
+	describe("error handling", () => {
+		it("should throw when joining while already in room", async () => {
+			const transport = new LocalTransport("test");
+			const session = createSession({
+				game: new TestGame(),
+				transport,
+			});
+
+			await session.createRoom();
+
+			// Can't join while already in a room
+			await assert.rejects(
+				session.joinRoom("other-room", "other-host"),
+				/Already in a room/,
+				"Joining while in room should throw descriptive error",
+			);
+		});
+
+		it("should throw when starting from wrong state", async () => {
+			const transport = new LocalTransport("host");
+			const session = createSession({
+				game: new TestGame(),
+				transport,
+			});
+
+			// Create room, start, then try to start again
+			await session.createRoom();
+			session.start();
+
+			// Already playing - can't start again
+			assert.throws(
+				() => session.start(),
+				/Can only start from lobby state/,
+				"Starting while already playing should throw descriptive error",
+			);
+		});
+
+		it("should throw when non-host tries to pause", async () => {
+			const transports = createLocalTransportGroup(["host", "client"]);
+			const hostTransport = getTransport(transports, "host");
+			const clientTransport = getTransport(transports, "client");
+
+			const hostSession = createSession({
+				game: new TestGame(),
+				transport: hostTransport,
+			});
+			const clientSession = createSession({
+				game: new TestGame(),
+				transport: clientTransport,
+			});
+
+			await hostSession.createRoom();
+			await clientSession.joinRoom(getRoomId(hostSession), "host");
+			clientTransport.flush();
+			hostTransport.flush();
+
+			hostSession.start();
+			hostTransport.flush();
+
+			// Client trying to pause should throw
+			assert.throws(
+				() => clientSession.pause(),
+				/Only the host can pause/,
+				"Non-host pause should throw descriptive error",
+			);
+		});
+
+		it("should emit error event for malformed messages", async () => {
+			const transport = new LocalTransport("host");
+			const session = createSession({
+				game: new TestGame(),
+				transport,
+			});
+
+			let errorReceived = false;
+			session.on("error", () => {
+				errorReceived = true;
+			});
+
+			await session.createRoom();
+
+			// Simulate receiving a malformed message
+			const malformedData = new Uint8Array([0xff, 0xff, 0xff]);
+
+			// Access internal message handling through transport callback
+			if (transport.onMessage) {
+				transport.onMessage("fake-peer", malformedData);
+			}
+
+			assert.strictEqual(
+				errorReceived,
+				true,
+				"Error event should be emitted for malformed messages",
+			);
+		});
+	});
 });
