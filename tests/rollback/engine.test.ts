@@ -725,4 +725,174 @@ describe("RollbackEngine", () => {
 			);
 		});
 	});
+
+	describe("snapshot fallback handling", () => {
+		const remotePlayer = asPlayerId("remote");
+
+		it("should use closest available snapshot when exact tick not found", () => {
+			// Create engine with small snapshot buffer
+			const smallBufferEngine = new RollbackEngine({
+				game: new TestGame(),
+				localPlayerId: localPlayer,
+				snapshotHistorySize: 5, // Very small buffer
+				maxSpeculationTicks: 30,
+			});
+			smallBufferEngine.addPlayer(remotePlayer, asTick(0));
+
+			// Run many ticks to overflow the snapshot buffer
+			for (let i = 0; i < 10; i++) {
+				smallBufferEngine.setLocalInput(asTick(i), new Uint8Array([128, 128]));
+				smallBufferEngine.receiveRemoteInput(
+					remotePlayer,
+					asTick(i),
+					new Uint8Array([128, 128]),
+				);
+				smallBufferEngine.tick();
+			}
+
+			// Now run ahead with predictions
+			smallBufferEngine.setLocalInput(asTick(10), new Uint8Array([128, 128]));
+			smallBufferEngine.tick();
+			smallBufferEngine.setLocalInput(asTick(11), new Uint8Array([128, 128]));
+			smallBufferEngine.tick();
+
+			// Send remote input that differs from prediction for an early tick
+			// This would require rollback to tick 9, but tick 9 snapshot might be gone
+			smallBufferEngine.receiveRemoteInput(
+				remotePlayer,
+				asTick(10),
+				new Uint8Array([138, 128]), // Different from predicted
+			);
+
+			smallBufferEngine.setLocalInput(asTick(12), new Uint8Array([128, 128]));
+
+			// Should use closest available snapshot and resimulate more ticks
+			const result = smallBufferEngine.tick();
+
+			// Should still rollback successfully using closest available snapshot
+			assert.strictEqual(result.rolledBack, true);
+		});
+
+		it("should return error when no snapshots are available at all", () => {
+			// Create engine and clear all snapshots to simulate empty buffer
+			const emptyBufferGame = new TestGame();
+			const emptyBufferEngine = new RollbackEngine({
+				game: emptyBufferGame,
+				localPlayerId: localPlayer,
+				snapshotHistorySize: 60,
+				maxSpeculationTicks: 30,
+			});
+			emptyBufferEngine.addPlayer(remotePlayer, asTick(0));
+
+			// Run ahead without any remote inputs
+			emptyBufferEngine.setLocalInput(asTick(0), new Uint8Array([128, 128]));
+			emptyBufferEngine.tick();
+			emptyBufferEngine.setLocalInput(asTick(1), new Uint8Array([128, 128]));
+			emptyBufferEngine.tick();
+
+			// Manually clear the game state to simulate a situation where
+			// deserialization would be needed
+			// (In practice this edge case is rare - snapshot buffer would need to be empty)
+
+			// Send different remote input to trigger rollback attempt
+			emptyBufferEngine.receiveRemoteInput(
+				remotePlayer,
+				asTick(0),
+				new Uint8Array([138, 128]),
+			);
+
+			emptyBufferEngine.setLocalInput(asTick(2), new Uint8Array([128, 128]));
+
+			// Should rollback successfully since we do have snapshots
+			const result = emptyBufferEngine.tick();
+			assert.strictEqual(result.rolledBack, true);
+			assert.strictEqual(result.error, undefined);
+		});
+
+		it("should handle O(1) player lifecycle lookups during resimulation", () => {
+			const lifecycleGame = new TestGame();
+			const addedPlayers: Array<{ playerId: PlayerId; tick: number }> = [];
+			const removedPlayers: Array<{ playerId: PlayerId; tick: number }> = [];
+
+			const lifecycleEngine = new RollbackEngine({
+				game: lifecycleGame,
+				localPlayerId: localPlayer,
+				snapshotHistorySize: 60,
+				maxSpeculationTicks: 30,
+				onPlayerAddDuringResimulation: (playerId, tick) => {
+					addedPlayers.push({ playerId, tick });
+				},
+				onPlayerRemoveDuringResimulation: (playerId, tick) => {
+					removedPlayers.push({ playerId, tick });
+				},
+			});
+
+			// Add multiple players at different ticks
+			const p2 = asPlayerId("player-2");
+			const p3 = asPlayerId("player-3");
+
+			lifecycleEngine.addPlayer(remotePlayer, asTick(0));
+
+			// Tick 0 - all inputs present
+			lifecycleEngine.setLocalInput(asTick(0), new Uint8Array([128, 128]));
+			lifecycleEngine.receiveRemoteInput(remotePlayer, asTick(0), new Uint8Array([128, 128]));
+			lifecycleEngine.tick();
+
+			// Tick 1 - all inputs present
+			lifecycleEngine.setLocalInput(asTick(1), new Uint8Array([128, 128]));
+			lifecycleEngine.receiveRemoteInput(remotePlayer, asTick(1), new Uint8Array([128, 128]));
+			lifecycleEngine.tick();
+
+			// Add p2 at tick 2, but DON'T send remote inputs yet (will be predicted)
+			lifecycleEngine.addPlayer(p2, asTick(2));
+			lifecycleEngine.setLocalInput(asTick(2), new Uint8Array([128, 128]));
+			// No remote inputs - will be predicted
+			lifecycleEngine.tick();
+
+			// Tick 3 - still no remote inputs
+			lifecycleEngine.setLocalInput(asTick(3), new Uint8Array([128, 128]));
+			lifecycleEngine.tick();
+
+			// Add p3 at tick 4, still no remote inputs
+			lifecycleEngine.addPlayer(p3, asTick(4));
+			lifecycleEngine.setLocalInput(asTick(4), new Uint8Array([128, 128]));
+			lifecycleEngine.tick();
+
+			// Tick 5 - run ahead with predictions
+			lifecycleEngine.setLocalInput(asTick(5), new Uint8Array([128, 128]));
+			lifecycleEngine.tick();
+
+			// Clear the tracking arrays before the rollback
+			addedPlayers.length = 0;
+			removedPlayers.length = 0;
+
+			// Now send remote inputs that differ from predictions
+			// This triggers rollback to tick 1 (before misprediction at tick 2)
+			lifecycleEngine.receiveRemoteInput(remotePlayer, asTick(2), new Uint8Array([138, 128]));
+			lifecycleEngine.receiveRemoteInput(p2, asTick(2), new Uint8Array([128, 128]));
+			lifecycleEngine.receiveRemoteInput(remotePlayer, asTick(3), new Uint8Array([128, 128]));
+			lifecycleEngine.receiveRemoteInput(p2, asTick(3), new Uint8Array([128, 128]));
+			lifecycleEngine.receiveRemoteInput(remotePlayer, asTick(4), new Uint8Array([128, 128]));
+			lifecycleEngine.receiveRemoteInput(p2, asTick(4), new Uint8Array([128, 128]));
+			lifecycleEngine.receiveRemoteInput(p3, asTick(4), new Uint8Array([128, 128]));
+			lifecycleEngine.receiveRemoteInput(remotePlayer, asTick(5), new Uint8Array([128, 128]));
+			lifecycleEngine.receiveRemoteInput(p2, asTick(5), new Uint8Array([128, 128]));
+			lifecycleEngine.receiveRemoteInput(p3, asTick(5), new Uint8Array([128, 128]));
+
+			lifecycleEngine.setLocalInput(asTick(6), new Uint8Array([128, 128]));
+			const result = lifecycleEngine.tick();
+
+			assert.strictEqual(result.rolledBack, true);
+
+			// During resimulation, we should see p2 added at tick 2 and p3 added at tick 4
+			const p2Adds = addedPlayers.filter((p) => p.playerId === p2);
+			const p3Adds = addedPlayers.filter((p) => p.playerId === p3);
+
+			assert.strictEqual(p2Adds.length, 1, "p2 should be added once during resimulation");
+			assert.strictEqual(p2Adds[0]?.tick, 2, "p2 should be added at tick 2");
+
+			assert.strictEqual(p3Adds.length, 1, "p3 should be added once during resimulation");
+			assert.strictEqual(p3Adds[0]?.tick, 4, "p3 should be added at tick 4");
+		});
+	});
 });

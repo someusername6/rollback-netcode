@@ -310,33 +310,46 @@ export class RollbackEngine {
 
 		// We need to rollback to the tick BEFORE the misprediction
 		const restoreTick = asTick(earliestMisprediction - 1);
-		const ticksToResimulate = this._currentTick - earliestMisprediction;
 
-		// Find snapshot to restore
-		const snapshot = this.snapshotBuffer.get(restoreTick);
+		// Find snapshot to restore - first try exact match
+		let snapshot = this.snapshotBuffer.get(restoreTick);
+		let actualRestoreTick = restoreTick;
+
 		if (!snapshot) {
-			// Can't rollback - snapshot not available
-			// This shouldn't happen if snapshotHistorySize is large enough
-			return {
-				rolledBack: false,
-				error: new RollbackError(
-					`Cannot rollback to tick ${restoreTick}: snapshot not available`,
-					restoreTick,
-				),
-			};
+			// Try to find the closest available snapshot at or before the target
+			snapshot = this.snapshotBuffer.getAtOrBefore(restoreTick);
+
+			if (!snapshot) {
+				// No snapshot available at all - this can happen at startup
+				// before any snapshots have been saved
+				return {
+					rolledBack: false,
+					error: new RollbackError(
+						`Cannot rollback to tick ${restoreTick}: no snapshots available in buffer`,
+						restoreTick,
+					),
+				};
+			}
+
+			// We found an earlier snapshot, adjust resimulation range
+			actualRestoreTick = snapshot.tick;
 		}
+
+		// Calculate resimulation range - from the tick AFTER the restored snapshot
+		const resimulateFromTick = asTick(actualRestoreTick + 1);
+		const ticksToResimulate = this._currentTick - resimulateFromTick;
 
 		// Restore game state
 		this.game.deserialize(snapshot.state);
 
 		// Notify about rollback before resimulation
-		this.onRollback?.(restoreTick);
+		this.onRollback?.(actualRestoreTick);
 
-		// Clear used inputs from the misprediction point onwards
-		this.inputBuffer.clearAllUsedInputsFrom(earliestMisprediction);
+		// Clear used inputs from the resimulation start tick onwards
+		this.inputBuffer.clearAllUsedInputsFrom(resimulateFromTick);
 
-		// Resimulate from misprediction tick to current tick
-		for (let tick = earliestMisprediction; tick < this._currentTick; tick++) {
+		// Resimulate from the tick after restored snapshot to current tick
+		for (let tick = resimulateFromTick; tick < this._currentTick; tick++) {
 			const tickAsTick = asTick(tick);
 
 			// Handle player lifecycle events at this tick
@@ -360,31 +373,22 @@ export class RollbackEngine {
 	/**
 	 * Handle player add/remove lifecycle events at a specific tick during resimulation.
 	 * This ensures the game layer knows about player joins/leaves when replaying history.
+	 * Uses O(1) tick-indexed lookups instead of iterating all players.
 	 */
 	private handlePlayerLifecycleAtTick(tick: Tick): void {
-		if (
-			!this.onPlayerAddDuringResimulation &&
-			!this.onPlayerRemoveDuringResimulation
-		) {
-			return;
+		// Handle player joins at this tick
+		if (this.onPlayerAddDuringResimulation) {
+			const joiningPlayers = this.inputBuffer.getPlayersJoiningAtTick(tick);
+			for (const playerId of joiningPlayers) {
+				this.onPlayerAddDuringResimulation(playerId, tick);
+			}
 		}
 
-		const allPlayers = this.inputBuffer.getAllPlayers();
-		for (const playerId of allPlayers) {
-			// Check if player joins at this tick
-			if (this.onPlayerAddDuringResimulation) {
-				const joinTick = this.inputBuffer.getJoinTick(playerId);
-				if (joinTick === tick) {
-					this.onPlayerAddDuringResimulation(playerId, tick);
-				}
-			}
-
-			// Check if player leaves at this tick
-			if (this.onPlayerRemoveDuringResimulation) {
-				const leaveTick = this.inputBuffer.getLeaveTick(playerId);
-				if (leaveTick === tick) {
-					this.onPlayerRemoveDuringResimulation(playerId, tick);
-				}
+		// Handle player leaves at this tick
+		if (this.onPlayerRemoveDuringResimulation) {
+			const leavingPlayers = this.inputBuffer.getPlayersLeavingAtTick(tick);
+			for (const playerId of leavingPlayers) {
+				this.onPlayerRemoveDuringResimulation(playerId, tick);
 			}
 		}
 	}

@@ -54,6 +54,12 @@ function inputsEqual(a: Uint8Array, b: Uint8Array): boolean {
 export class InputBuffer {
 	private readonly players: Map<PlayerId, PlayerInputState> = new Map();
 
+	/** Index of players by their join tick for O(1) lookup */
+	private readonly joinsByTick: Map<Tick, Set<PlayerId>> = new Map();
+
+	/** Index of players by their leave tick for O(1) lookup */
+	private readonly leavesByTick: Map<Tick, Set<PlayerId>> = new Map();
+
 	/**
 	 * Add a player to the buffer.
 	 *
@@ -65,11 +71,19 @@ export class InputBuffer {
 		if (existing) {
 			// If player is rejoining, update join tick and clear leave tick
 			if (existing.leaveTick !== null) {
+				// Remove from old join tick index
+				this.removeFromTickIndex(this.joinsByTick, existing.joinTick, playerId);
+				// Remove from leave tick index
+				this.removeFromTickIndex(this.leavesByTick, existing.leaveTick, playerId);
+
 				existing.joinTick = joinTick;
 				existing.leaveTick = null;
 				existing.confirmedTick = asTick(joinTick - 1);
 				existing.received.clear();
 				existing.usedInputs.clear();
+
+				// Add to new join tick index
+				this.addToTickIndex(this.joinsByTick, joinTick, playerId);
 			}
 			return;
 		}
@@ -81,6 +95,9 @@ export class InputBuffer {
 			confirmedTick: asTick(joinTick - 1), // No inputs confirmed yet
 			usedInputs: new Map(),
 		});
+
+		// Add to join tick index
+		this.addToTickIndex(this.joinsByTick, joinTick, playerId);
 	}
 
 	/**
@@ -92,7 +109,15 @@ export class InputBuffer {
 	removePlayer(playerId: PlayerId, leaveTick: Tick): void {
 		const player = this.players.get(playerId);
 		if (player) {
+			// Remove from old leave tick index if they had one
+			if (player.leaveTick !== null) {
+				this.removeFromTickIndex(this.leavesByTick, player.leaveTick, playerId);
+			}
+
 			player.leaveTick = leaveTick;
+
+			// Add to leave tick index
+			this.addToTickIndex(this.leavesByTick, leaveTick, playerId);
 		}
 	}
 
@@ -454,6 +479,14 @@ export class InputBuffer {
 	 * @param playerId - The player's ID
 	 */
 	clearPlayer(playerId: PlayerId): void {
+		const player = this.players.get(playerId);
+		if (player) {
+			// Remove from tick indexes
+			this.removeFromTickIndex(this.joinsByTick, player.joinTick, playerId);
+			if (player.leaveTick !== null) {
+				this.removeFromTickIndex(this.leavesByTick, player.leaveTick, playerId);
+			}
+		}
 		this.players.delete(playerId);
 	}
 
@@ -462,5 +495,64 @@ export class InputBuffer {
 	 */
 	clear(): void {
 		this.players.clear();
+		this.joinsByTick.clear();
+		this.leavesByTick.clear();
+	}
+
+	/**
+	 * Get all players that join at a specific tick.
+	 * O(1) lookup using tick-indexed map.
+	 *
+	 * @param tick - The tick to check
+	 * @returns Array of player IDs joining at this tick
+	 */
+	getPlayersJoiningAtTick(tick: Tick): PlayerId[] {
+		const players = this.joinsByTick.get(tick);
+		return players ? Array.from(players) : [];
+	}
+
+	/**
+	 * Get all players that leave at a specific tick.
+	 * O(1) lookup using tick-indexed map.
+	 *
+	 * @param tick - The tick to check
+	 * @returns Array of player IDs leaving at this tick
+	 */
+	getPlayersLeavingAtTick(tick: Tick): PlayerId[] {
+		const players = this.leavesByTick.get(tick);
+		return players ? Array.from(players) : [];
+	}
+
+	/**
+	 * Add a player to a tick index.
+	 */
+	private addToTickIndex(
+		index: Map<Tick, Set<PlayerId>>,
+		tick: Tick,
+		playerId: PlayerId,
+	): void {
+		let players = index.get(tick);
+		if (!players) {
+			players = new Set();
+			index.set(tick, players);
+		}
+		players.add(playerId);
+	}
+
+	/**
+	 * Remove a player from a tick index.
+	 */
+	private removeFromTickIndex(
+		index: Map<Tick, Set<PlayerId>>,
+		tick: Tick,
+		playerId: PlayerId,
+	): void {
+		const players = index.get(tick);
+		if (players) {
+			players.delete(playerId);
+			if (players.size === 0) {
+				index.delete(tick);
+			}
+		}
 	}
 }

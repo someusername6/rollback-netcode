@@ -656,4 +656,99 @@ describe("InputBuffer", () => {
 			assert.strictEqual(buffer.findMisprediction(p2, asTick(0)), undefined);
 		});
 	});
+
+	describe("getPlayersJoiningAtTick and getPlayersLeavingAtTick", () => {
+		it("should return players joining at a specific tick", () => {
+			const buffer = new InputBuffer();
+			const p1 = asPlayerId("player-1");
+			const p2 = asPlayerId("player-2");
+			const p3 = asPlayerId("player-3");
+
+			buffer.addPlayer(p1, asTick(0));
+			buffer.addPlayer(p2, asTick(5));
+			buffer.addPlayer(p3, asTick(5));
+
+			const joiningAt0 = buffer.getPlayersJoiningAtTick(asTick(0));
+			const joiningAt5 = buffer.getPlayersJoiningAtTick(asTick(5));
+			const joiningAt10 = buffer.getPlayersJoiningAtTick(asTick(10));
+
+			assert.deepStrictEqual(joiningAt0.sort(), [p1]);
+			assert.deepStrictEqual(joiningAt5.sort(), [p2, p3].sort());
+			assert.deepStrictEqual(joiningAt10, []);
+		});
+
+		it("should return players leaving at a specific tick", () => {
+			const buffer = new InputBuffer();
+			const p1 = asPlayerId("player-1");
+			const p2 = asPlayerId("player-2");
+
+			buffer.addPlayer(p1, asTick(0));
+			buffer.addPlayer(p2, asTick(0));
+			buffer.removePlayer(p1, asTick(10));
+			buffer.removePlayer(p2, asTick(10));
+
+			const leavingAt10 = buffer.getPlayersLeavingAtTick(asTick(10));
+			const leavingAt5 = buffer.getPlayersLeavingAtTick(asTick(5));
+
+			assert.deepStrictEqual(leavingAt10.sort(), [p1, p2].sort());
+			assert.deepStrictEqual(leavingAt5, []);
+		});
+
+		it("should handle player rejoin correctly in tick indexes", () => {
+			const buffer = new InputBuffer();
+			const p1 = asPlayerId("player-1");
+
+			buffer.addPlayer(p1, asTick(0));
+			buffer.removePlayer(p1, asTick(10));
+			buffer.addPlayer(p1, asTick(20));
+
+			// Old join tick should be removed from index
+			assert.deepStrictEqual(buffer.getPlayersJoiningAtTick(asTick(0)), []);
+			// Old leave tick should be removed from index
+			assert.deepStrictEqual(buffer.getPlayersLeavingAtTick(asTick(10)), []);
+			// New join tick should be in index
+			assert.deepStrictEqual(buffer.getPlayersJoiningAtTick(asTick(20)), [p1]);
+		});
+
+		it("should update leave tick index when removePlayer is called multiple times", () => {
+			const buffer = new InputBuffer();
+			const p1 = asPlayerId("player-1");
+
+			buffer.addPlayer(p1, asTick(0));
+			buffer.removePlayer(p1, asTick(10));
+			buffer.removePlayer(p1, asTick(15)); // Update leave tick
+
+			assert.deepStrictEqual(buffer.getPlayersLeavingAtTick(asTick(10)), []);
+			assert.deepStrictEqual(buffer.getPlayersLeavingAtTick(asTick(15)), [p1]);
+		});
+
+		it("should clear tick indexes when clear() is called", () => {
+			const buffer = new InputBuffer();
+			const p1 = asPlayerId("player-1");
+
+			buffer.addPlayer(p1, asTick(5));
+			buffer.removePlayer(p1, asTick(10));
+
+			buffer.clear();
+
+			assert.deepStrictEqual(buffer.getPlayersJoiningAtTick(asTick(5)), []);
+			assert.deepStrictEqual(buffer.getPlayersLeavingAtTick(asTick(10)), []);
+		});
+
+		it("should remove from tick indexes when clearPlayer() is called", () => {
+			const buffer = new InputBuffer();
+			const p1 = asPlayerId("player-1");
+			const p2 = asPlayerId("player-2");
+
+			buffer.addPlayer(p1, asTick(5));
+			buffer.addPlayer(p2, asTick(5));
+			buffer.removePlayer(p1, asTick(10));
+
+			buffer.clearPlayer(p1);
+
+			// p1 should be removed from indexes, but p2 should remain
+			assert.deepStrictEqual(buffer.getPlayersJoiningAtTick(asTick(5)), [p2]);
+			assert.deepStrictEqual(buffer.getPlayersLeavingAtTick(asTick(10)), []);
+		});
+	});
 });
