@@ -2,41 +2,7 @@ import assert from "node:assert";
 import { beforeEach, describe, it } from "node:test";
 import { type Game, type PlayerId, asPlayerId, asTick } from "../../src/types.js";
 import { RollbackEngine } from "../../src/rollback/engine.js";
-
-/**
- * Simple test game that tracks position.
- */
-class TestGame implements Game {
-	x = 0;
-	y = 0;
-
-	serialize(): Uint8Array {
-		const buffer = new ArrayBuffer(8);
-		const view = new DataView(buffer);
-		view.setInt32(0, this.x);
-		view.setInt32(4, this.y);
-		return new Uint8Array(buffer);
-	}
-
-	deserialize(data: Uint8Array): void {
-		const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-		this.x = view.getInt32(0);
-		this.y = view.getInt32(4);
-	}
-
-	step(inputs: Map<PlayerId, Uint8Array>): void {
-		for (const [, input] of inputs) {
-			if (input.length >= 2) {
-				this.x += (input[0] ?? 0) - 128; // Center at 128
-				this.y += (input[1] ?? 0) - 128;
-			}
-		}
-	}
-
-	hash(): number {
-		return this.x * 10000 + this.y;
-	}
-}
+import { TestGame } from "../utils/test-game.js";
 
 describe("RollbackEngine", () => {
 	let game: TestGame;

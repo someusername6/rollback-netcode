@@ -6,83 +6,16 @@ import {
 } from "../../src/transport/local.js";
 import {
 	DesyncAuthority,
-	type Game,
-	type PlayerId,
 	type Tick,
 	Topology,
 } from "../../src/types.js";
 import { createSession } from "../../src/session/session.js";
+import { DesyncableTestGame as TestGame, TestInputs } from "../utils/test-game.js";
 
 /**
  * Neutral input that causes no movement (128 - 128 = 0 for both axes).
  */
-const NEUTRAL_INPUT = new Uint8Array([128, 128]);
-
-/**
- * Test game that can be configured to behave non-deterministically.
- * When `nonDeterministic` is true, the step function adds extra value,
- * causing the game to desync from other instances.
- *
- * By default, behaves deterministically (can be used as a normal test game).
- */
-class TestGame implements Game {
-	x = 0;
-	y = 0;
-
-	/** When true, adds extra value to x on each step, causing desync */
-	private nonDeterministic = false;
-
-	/** Extra value added when non-deterministic (simulates a bug) */
-	private extraValue = 0;
-
-	serialize(): Uint8Array {
-		const buffer = new ArrayBuffer(8);
-		const view = new DataView(buffer);
-		view.setInt32(0, this.x);
-		view.setInt32(4, this.y);
-		return new Uint8Array(buffer);
-	}
-
-	deserialize(data: Uint8Array): void {
-		const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-		this.x = view.getInt32(0);
-		this.y = view.getInt32(4);
-	}
-
-	step(inputs: Map<PlayerId, Uint8Array>): void {
-		for (const [, input] of inputs) {
-			if (input.length >= 2) {
-				this.x += (input[0] ?? 0) - 128;
-				this.y += (input[1] ?? 0) - 128;
-			}
-		}
-
-		// When non-deterministic, add extra value (simulates a bug)
-		if (this.nonDeterministic) {
-			this.x += this.extraValue;
-		}
-	}
-
-	hash(): number {
-		return this.x * 10000 + this.y;
-	}
-
-	/**
-	 * Enable non-deterministic behavior to cause desync.
-	 */
-	enableDesync(extraValue = 1): void {
-		this.nonDeterministic = true;
-		this.extraValue = extraValue;
-	}
-
-	/**
-	 * Disable non-deterministic behavior.
-	 */
-	disableDesync(): void {
-		this.nonDeterministic = false;
-		this.extraValue = 0;
-	}
-}
+const NEUTRAL_INPUT = TestInputs.NEUTRAL;
 
 /**
  * Helper to get a transport from the map with assertion.
