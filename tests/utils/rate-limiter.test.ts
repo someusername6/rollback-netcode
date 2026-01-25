@@ -111,14 +111,16 @@ describe("RateLimiter", () => {
 
 	describe("cleanup", () => {
 		it("should remove keys with no recent requests", () => {
-			const limiter = new RateLimiter({ maxRequests: 3, windowMs: 10 });
+			let currentTime = 1000;
+			const limiter = new RateLimiter({
+				maxRequests: 3,
+				windowMs: 100,
+				getNow: () => currentTime,
+			});
 			limiter.record("peer1");
 
-			// Wait for window to expire
-			const start = Date.now();
-			while (Date.now() - start < 20) {
-				// busy wait
-			}
+			// Advance time past the window
+			currentTime += 200;
 
 			limiter.cleanup();
 			// After cleanup, peer1 should no longer be limited
@@ -126,7 +128,12 @@ describe("RateLimiter", () => {
 		});
 
 		it("should keep keys with recent requests", () => {
-			const limiter = new RateLimiter({ maxRequests: 1, windowMs: 10000 });
+			let currentTime = 1000;
+			const limiter = new RateLimiter({
+				maxRequests: 1,
+				windowMs: 10000,
+				getNow: () => currentTime,
+			});
 			limiter.record("peer1");
 			limiter.cleanup();
 			// Should still be limited
@@ -149,16 +156,18 @@ describe("RateLimiter", () => {
 
 	describe("window expiry", () => {
 		it("should not count expired requests", () => {
-			const limiter = new RateLimiter({ maxRequests: 2, windowMs: 10 });
+			let currentTime = 1000;
+			const limiter = new RateLimiter({
+				maxRequests: 2,
+				windowMs: 100,
+				getNow: () => currentTime,
+			});
 			limiter.record("peer1");
 			limiter.record("peer1");
 			assert.strictEqual(limiter.isLimited("peer1"), true);
 
-			// Wait for window to expire
-			const start = Date.now();
-			while (Date.now() - start < 20) {
-				// busy wait
-			}
+			// Advance time past the window
+			currentTime += 200;
 
 			// Old requests should have expired
 			assert.strictEqual(limiter.isLimited("peer1"), false);

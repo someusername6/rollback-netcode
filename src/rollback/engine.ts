@@ -359,9 +359,9 @@ export class RollbackEngine {
 		if (minConfirmed !== undefined && minConfirmed > this._confirmedTick) {
 			this._confirmedTick = minConfirmed;
 
-			// Prune old data
-			const pruneBelow = asTick(this._confirmedTick - PRUNE_BUFFER_TICKS);
-			if (pruneBelow > 0) {
+			// Prune old data only when we have enough confirmed ticks to keep a buffer
+			if (this._confirmedTick > PRUNE_BUFFER_TICKS) {
+				const pruneBelow = asTick(this._confirmedTick - PRUNE_BUFFER_TICKS);
 				this.inputBuffer.pruneBeforeTick(pruneBelow);
 				this.snapshotBuffer.pruneBeforeTick(pruneBelow);
 

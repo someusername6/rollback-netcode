@@ -226,10 +226,7 @@ export class WebRTCTransport implements TransportAdapter {
 		this.connectionTimeout =
 			config.connectionTimeout ?? DEFAULT_CONNECTION_TIMEOUT_MS;
 
-		// Start keepalive timer if enabled
-		if (this.keepaliveInterval > 0) {
-			this.startKeepaliveTimer();
-		}
+		// Note: Keepalive timer is started when first peer connects, not here
 	}
 
 	/**
@@ -286,7 +283,24 @@ export class WebRTCTransport implements TransportAdapter {
 			}
 		});
 
-		await this.createOffer(peerId);
+		try {
+			await this.createOffer(peerId);
+		} catch (error) {
+			// If offer creation fails, reject the connection promise and clean up
+			if (peer.connectionReject) {
+				peer.connectionReject(
+					error instanceof Error ? error : new Error(String(error)),
+				);
+				peer.connectionResolve = null;
+				peer.connectionReject = null;
+			}
+			if (peer.connectionTimer) {
+				clearTimeout(peer.connectionTimer);
+				peer.connectionTimer = null;
+			}
+			this.cleanupPeer(peerId, peer);
+			// Don't re-throw - the promise rejection is sufficient
+		}
 
 		return peer.connectionPromise;
 	}
@@ -597,7 +611,13 @@ export class WebRTCTransport implements TransportAdapter {
 		if (reliableReady && unreliableReady && !peer.isConnected) {
 			peer.isConnected = true;
 			peer.reconnectAttempts = 0;
+
+			// Start keepalive timer when first peer connects
+			const wasEmpty = this._connectedPeers.size === 0;
 			this._connectedPeers.add(peerId);
+			if (wasEmpty && this.keepaliveInterval > 0) {
+				this.startKeepaliveTimer();
+			}
 
 			// Clear connection timeout
 			if (peer.connectionTimer) {
@@ -623,6 +643,11 @@ export class WebRTCTransport implements TransportAdapter {
 		const wasConnected = peer.isConnected;
 		peer.isConnected = false;
 		this._connectedPeers.delete(peerId);
+
+		// Stop keepalive timer when last peer disconnects
+		if (this._connectedPeers.size === 0) {
+			this.stopKeepaliveTimer();
+		}
 
 		// Reject connection promise if pending
 		if (peer.connectionReject) {
@@ -736,6 +761,11 @@ export class WebRTCTransport implements TransportAdapter {
 		this._connectedPeers.delete(peerId);
 		this.peers.delete(peerId);
 		this.peerMetrics.delete(peerId);
+
+		// Stop keepalive timer when last peer disconnects
+		if (this._connectedPeers.size === 0) {
+			this.stopKeepaliveTimer();
+		}
 
 		// Reject connection promise if pending
 		if (peer.connectionReject) {

@@ -12,6 +12,8 @@ export interface RateLimiterConfig {
 	maxRequests: number;
 	/** Time window in milliseconds */
 	windowMs: number;
+	/** Optional custom time source for testing (defaults to Date.now) */
+	getNow?: () => number;
 }
 
 /**
@@ -23,6 +25,7 @@ export class RateLimiter {
 	private readonly maxRequests: number;
 	private readonly windowMs: number;
 	private readonly requests: Map<string, number[]> = new Map();
+	private readonly getNow: () => number;
 
 	constructor(config: RateLimiterConfig) {
 		if (config.maxRequests <= 0) {
@@ -33,6 +36,7 @@ export class RateLimiter {
 		}
 		this.maxRequests = config.maxRequests;
 		this.windowMs = config.windowMs;
+		this.getNow = config.getNow ?? (() => Date.now());
 	}
 
 	/**
@@ -42,7 +46,7 @@ export class RateLimiter {
 	 * @returns true if the key has exceeded the rate limit
 	 */
 	isLimited(key: string): boolean {
-		const now = Date.now();
+		const now = this.getNow();
 		const timestamps = this.requests.get(key) ?? [];
 
 		// Filter to only recent timestamps within the window
@@ -59,7 +63,7 @@ export class RateLimiter {
 	 */
 	record(key: string): void {
 		const timestamps = this.requests.get(key) ?? [];
-		timestamps.push(Date.now());
+		timestamps.push(this.getNow());
 		this.requests.set(key, timestamps);
 	}
 
@@ -71,7 +75,7 @@ export class RateLimiter {
 	 * @returns true if the key is rate limited (request should be rejected)
 	 */
 	checkAndRecord(key: string): boolean {
-		const now = Date.now();
+		const now = this.getNow();
 		const timestamps = this.requests.get(key) ?? [];
 		const recentTimestamps = timestamps.filter((t) => now - t < this.windowMs);
 
@@ -90,7 +94,7 @@ export class RateLimiter {
 	 * Call this periodically (e.g., every minute).
 	 */
 	cleanup(): void {
-		const now = Date.now();
+		const now = this.getNow();
 		for (const [key, timestamps] of this.requests) {
 			const recentTimestamps = timestamps.filter(
 				(t) => now - t < this.windowMs,

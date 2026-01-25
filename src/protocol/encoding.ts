@@ -63,6 +63,21 @@ export class DecodeError extends Error {
 }
 
 /**
+ * Error thrown when encoding a message fails due to invalid values.
+ */
+export class EncodeError extends Error {
+	constructor(
+		message: string,
+		public readonly field: string,
+		public readonly maxValue: number,
+		public readonly actualValue: number,
+	) {
+		super(`${message}: ${field} must be <= ${maxValue}, got ${actualValue}`);
+		this.name = "EncodeError";
+	}
+}
+
+/**
  * Ensure the buffer has enough bytes to read.
  * @throws DecodeError if insufficient bytes
  */
@@ -290,6 +305,16 @@ export function decodeMessage(data: Uint8Array): Message {
 // =============================================================================
 
 function encodeInputMessage(msg: InputMessage): Uint8Array {
+	// Validate input count fits in Uint8
+	if (msg.inputs.length > 255) {
+		throw new EncodeError(
+			"Input count exceeds maximum",
+			"inputs.length",
+			255,
+			msg.inputs.length,
+		);
+	}
+
 	const playerIdBytes = textEncoder.encode(msg.playerId);
 	let totalSize =
 		1 + // type

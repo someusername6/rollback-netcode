@@ -1,7 +1,7 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
 import { PauseReason, PlayerRole, asPlayerId, asTick } from "../../src/types.js";
-import { DecodeError, decodeMessage, encodeMessage } from "../../src/protocol/encoding.js";
+import { DecodeError, EncodeError, decodeMessage, encodeMessage } from "../../src/protocol/encoding.js";
 import { MessageType } from "../../src/protocol/messages.js";
 
 describe("Message Encoding/Decoding", () => {
@@ -51,6 +51,31 @@ describe("Message Encoding/Decoding", () => {
 			if (decoded.type === MessageType.Input) {
 				assert.strictEqual(decoded.inputs.length, 0);
 			}
+		});
+
+		it("should throw EncodeError when inputs exceed 255", () => {
+			// Create message with 256 inputs (exceeds Uint8 max)
+			const inputs = Array.from({ length: 256 }, (_, i) => ({
+				tick: asTick(i),
+				input: new Uint8Array([1]),
+			}));
+
+			const msg = {
+				type: MessageType.Input as const,
+				playerId: asPlayerId("player-1"),
+				inputs,
+			};
+
+			assert.throws(
+				() => encodeMessage(msg),
+				(error: unknown) => {
+					assert.ok(error instanceof EncodeError);
+					assert.strictEqual(error.field, "inputs.length");
+					assert.strictEqual(error.maxValue, 255);
+					assert.strictEqual(error.actualValue, 256);
+					return true;
+				},
+			);
 		});
 	});
 

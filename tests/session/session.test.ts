@@ -388,6 +388,55 @@ describe("Session", () => {
 
 			assert.strictEqual(started, true);
 		});
+
+		it("should remove all listeners for a specific event", async () => {
+			const transport = new LocalTransport("host");
+			const game = new TestGame();
+			const session = createSession({ game, transport });
+
+			let callCount = 0;
+			session.on("gameStart", () => {
+				callCount++;
+			});
+			session.on("gameStart", () => {
+				callCount++;
+			});
+
+			// Remove all gameStart listeners
+			session.removeAllListeners("gameStart");
+
+			await session.createRoom();
+			session.start();
+
+			// Neither handler should have been called
+			assert.strictEqual(callCount, 0);
+		});
+
+		it("should remove all listeners when no event specified", async () => {
+			const transport = new LocalTransport("host");
+			const game = new TestGame();
+			const session = createSession({ game, transport });
+
+			let gameStartCalled = false;
+			let stateChangeCalled = false;
+
+			session.on("gameStart", () => {
+				gameStartCalled = true;
+			});
+			session.on("stateChange", () => {
+				stateChangeCalled = true;
+			});
+
+			// Remove all listeners
+			session.removeAllListeners();
+
+			await session.createRoom();
+			session.start();
+
+			// No handlers should have been called
+			assert.strictEqual(gameStartCalled, false);
+			assert.strictEqual(stateChangeCalled, false);
+		});
 	});
 
 	describe("multi-player sync", () => {

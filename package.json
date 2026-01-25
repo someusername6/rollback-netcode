@@ -10,7 +10,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "node --import tsx --test tests/**/*.test.ts",
+    "test": "node --import tsx --test tests/*.test.ts tests/**/*.test.ts",
     "lint": "biome check src/",
     "format": "biome format --write src/",
     "benchmark": "node --import tsx src/benchmark.ts"

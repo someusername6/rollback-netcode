@@ -13,6 +13,11 @@ export type Tick = number & { readonly __brand: "Tick" };
 
 /**
  * A unique player identifier.
+ *
+ * Note: In the current implementation, PlayerId and PeerId (transport layer identifier)
+ * are the same string value. The default behavior is to use the transport's localPeerId
+ * as the localPlayerId. This means `playerId as string` can be used as a peer ID for
+ * transport operations, and vice versa with `asPlayerId(peerId)`.
  */
 export type PlayerId = string & { readonly __brand: "PlayerId" };
 
@@ -28,6 +33,16 @@ export function asTick(n: number): Tick {
  */
 export function asPlayerId(s: string): PlayerId {
 	return s as PlayerId;
+}
+
+/**
+ * Convert a PlayerId to a transport peer ID string.
+ *
+ * In the current implementation, these are the same value,
+ * but this function makes the intent explicit in code.
+ */
+export function playerIdToPeerId(playerId: PlayerId): string {
+	return playerId;
 }
 
 // =============================================================================
@@ -177,6 +192,25 @@ export interface SessionConfig {
 	 * @default 30
 	 */
 	lagReportThreshold: number;
+
+	/**
+	 * Number of ticks of input to include in each message for redundancy.
+	 * Higher values improve reliability on lossy connections but increase bandwidth.
+	 * @default 3
+	 */
+	inputRedundancy: number;
+
+	/**
+	 * Maximum join requests allowed per peer within the rate limit window.
+	 * @default 3
+	 */
+	joinRateLimitRequests: number;
+
+	/**
+	 * Time window in milliseconds for join request rate limiting.
+	 * @default 10000
+	 */
+	joinRateLimitWindowMs: number;
 }
 
 /**
@@ -193,6 +227,9 @@ export const DEFAULT_SESSION_CONFIG: SessionConfig = {
 	debug: false,
 	desyncAuthority: DesyncAuthority.Peer,
 	lagReportThreshold: 30,
+	inputRedundancy: 3,
+	joinRateLimitRequests: 3,
+	joinRateLimitWindowMs: 10000,
 };
 
 /** Maximum allowed players in a session */
@@ -267,6 +304,30 @@ export function validateSessionConfig(config: SessionConfig): void {
 			"lagReportThreshold must be >= 0",
 			"lagReportThreshold",
 			config.lagReportThreshold,
+		);
+	}
+
+	if (config.inputRedundancy < 1) {
+		throw new ValidationError(
+			"inputRedundancy must be >= 1",
+			"inputRedundancy",
+			config.inputRedundancy,
+		);
+	}
+
+	if (config.joinRateLimitRequests < 1) {
+		throw new ValidationError(
+			"joinRateLimitRequests must be >= 1",
+			"joinRateLimitRequests",
+			config.joinRateLimitRequests,
+		);
+	}
+
+	if (config.joinRateLimitWindowMs <= 0) {
+		throw new ValidationError(
+			"joinRateLimitWindowMs must be > 0",
+			"joinRateLimitWindowMs",
+			config.joinRateLimitWindowMs,
 		);
 	}
 }

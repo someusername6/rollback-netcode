@@ -104,6 +104,7 @@ export type {
 export {
 	asPlayerId,
 	asTick,
+	playerIdToPeerId,
 	DEFAULT_SESSION_CONFIG,
 	DEFAULT_INPUT_PREDICTOR,
 	MAX_PLAYERS_LIMIT,

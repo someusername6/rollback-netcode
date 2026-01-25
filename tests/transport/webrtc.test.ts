@@ -355,6 +355,20 @@ describe("WebRTCTransport", () => {
 	});
 
 	describe("error handling", () => {
+		it("should reject connect() when signaling callbacks not set", async () => {
+			const transport = new WebRTCTransport("local", { keepaliveInterval: 0 });
+			// Don't set signaling callbacks
+
+			// connect() should reject because createOffer requires signaling callbacks
+			await assert.rejects(
+				transport.connect("peer1"),
+				/Signaling callbacks not set/,
+				"connect() should reject when signaling callbacks are not set",
+			);
+
+			transport.destroy();
+		});
+
 		it("should handle send errors gracefully without throwing", async () => {
 			const transport = new WebRTCTransport("local", { keepaliveInterval: 0 });
 			transport.setSignalingCallbacks({

@@ -28,6 +28,7 @@ import {
 	Topology,
 	asPlayerId,
 	asTick,
+	playerIdToPeerId,
 	validateSessionConfig,
 } from "../types.js";
 
@@ -35,7 +36,7 @@ import { type DebugLogger, createDebugLogger } from "../debug.js";
 import { encodeMessage } from "../protocol/encoding.js";
 import {
 	type Message,
-	MessageType,
+	type MessageType,
 	isReliableMessage,
 } from "../protocol/messages.js";
 import {
@@ -48,18 +49,29 @@ import {
 	DEFAULT_LAG_REPORT_COOLDOWN_TICKS,
 	LagMonitor,
 } from "./lag-monitor.js";
+import {
+	createDisconnectReport,
+	createDropPlayer,
+	createHash,
+	createInput,
+	createJoinAccept,
+	createJoinReject,
+	createJoinRequest,
+	createLagReport,
+	createPause,
+	createPing,
+	createPlayerJoined,
+	createPlayerLeft,
+	createPong,
+	createResume,
+	createResumeCountdown,
+	createStateSync,
+	createSync,
+	createSyncRequest,
+} from "./message-builders.js";
 import { type MessageHandlers, MessageRouter } from "./message-router.js";
 import { PlayerManager } from "./player-manager.js";
 import { type TopologyStrategy, createTopologyStrategy } from "./topology.js";
-
-/** Number of ticks of input to include in each message for redundancy */
-const DEFAULT_INPUT_REDUNDANCY = 3;
-
-/** Maximum join requests per peer within the rate limit window */
-const JOIN_REQUEST_LIMIT = 3;
-
-/** Time window for rate limiting join requests (in milliseconds) */
-const JOIN_REQUEST_WINDOW_MS = 10000;
 
 /** Interval for cleaning up stale rate limit entries (in milliseconds) */
 const RATE_LIMIT_CLEANUP_INTERVAL_MS = 60000;
@@ -134,7 +146,7 @@ export class Session {
 	private _roomId: string | null = null;
 	private _localRole: PlayerRole = PlayerRole.Player;
 	private lastHashBroadcastTick: Tick = asTick(-1);
-	private inputRedundancy = DEFAULT_INPUT_REDUNDANCY;
+	private readonly inputRedundancy: number;
 
 	/** Timer for periodic rate limit cleanup */
 	private rateLimitCleanupTimer: ReturnType<typeof setInterval> | null = null;
@@ -172,9 +184,10 @@ export class Session {
 			cooldownTicks: DEFAULT_LAG_REPORT_COOLDOWN_TICKS,
 		});
 		this.joinRateLimiter = new RateLimiter({
-			maxRequests: JOIN_REQUEST_LIMIT,
-			windowMs: JOIN_REQUEST_WINDOW_MS,
+			maxRequests: this.config.joinRateLimitRequests,
+			windowMs: this.config.joinRateLimitWindowMs,
 		});
+		this.inputRedundancy = this.config.inputRedundancy;
 
 		// Create message router with handlers
 		this.messageRouter = new MessageRouter(
@@ -338,8 +351,7 @@ export class Session {
 			return null;
 		}
 
-		// Get the peer ID for this player - in this case player ID is the peer ID
-		const peerId = playerId as string;
+		const peerId = playerIdToPeerId(playerId);
 
 		// Check if transport supports metrics
 		if (this.transport.getConnectionMetrics) {
@@ -416,12 +428,7 @@ export class Session {
 		await this.transport.connect(hostPeerId);
 
 		// Send join request with role
-		const joinRequest: Message = {
-			type: MessageType.JoinRequest,
-			playerId: this.localPlayerId,
-			role: this._localRole,
-		};
-		this.sendToHost(joinRequest);
+		this.sendToHost(createJoinRequest(this.localPlayerId, this._localRole));
 	}
 
 	/**
@@ -434,12 +441,10 @@ export class Session {
 
 		// Notify other players
 		if (this._state === SessionState.Playing) {
-			const leaveMsg: Message = {
-				type: MessageType.PlayerLeft,
-				playerId: this.localPlayerId,
-				leaveTick: this.engine.currentTick,
-			};
-			this.broadcast(leaveMsg, true);
+			this.broadcast(
+				createPlayerLeft(this.localPlayerId, this.engine.currentTick),
+				true,
+			);
 		}
 
 		// Disconnect from all peers
@@ -488,14 +493,15 @@ export class Session {
 
 		// Send state sync to all players
 		const state = this.engine.getState();
-		const syncMsg: Message = {
-			type: MessageType.StateSync,
-			tick: state.tick,
-			state: state.state,
-			hash: this.engine.getCurrentHash(),
-			playerTimeline: state.playerTimeline,
-		};
-		this.broadcast(syncMsg, true);
+		this.broadcast(
+			createStateSync(
+				state.tick,
+				state.state,
+				this.engine.getCurrentHash(),
+				state.playerTimeline,
+			),
+			true,
+		);
 
 		this.setState(SessionState.Playing);
 		this.emit("gameStart");
@@ -512,13 +518,10 @@ export class Session {
 			return;
 		}
 
-		const pauseMsg: Message = {
-			type: MessageType.Pause,
-			playerId: this.localPlayerId,
-			pauseTick: this.engine.currentTick,
-			reason,
-		};
-		this.broadcast(pauseMsg, true);
+		this.broadcast(
+			createPause(this.localPlayerId, this.engine.currentTick, reason),
+			true,
+		);
 
 		this.setState(SessionState.Paused);
 	}
@@ -534,12 +537,10 @@ export class Session {
 			return;
 		}
 
-		const resumeMsg: Message = {
-			type: MessageType.Resume,
-			playerId: this.localPlayerId,
-			resumeTick: this.engine.currentTick,
-		};
-		this.broadcast(resumeMsg, true);
+		this.broadcast(
+			createResume(this.localPlayerId, this.engine.currentTick),
+			true,
+		);
 
 		this.setState(SessionState.Playing);
 	}
@@ -558,11 +559,7 @@ export class Session {
 			return;
 		}
 
-		const countdownMsg: Message = {
-			type: MessageType.ResumeCountdown,
-			secondsRemaining,
-		};
-		this.broadcast(countdownMsg, true);
+		this.broadcast(createResumeCountdown(secondsRemaining), true);
 
 		// Also emit locally so host's game layer can react
 		this.emit("resumeCountdown", secondsRemaining);
@@ -589,11 +586,7 @@ export class Session {
 		this.markPlayerDisconnected(playerId);
 
 		// Broadcast DropPlayer to all other players
-		const dropMsg: Message =
-			metadata !== undefined
-				? { type: MessageType.DropPlayer, playerId, metadata }
-				: { type: MessageType.DropPlayer, playerId };
-		this.broadcast(dropMsg, true);
+		this.broadcast(createDropPlayer(playerId, metadata), true);
 
 		// Emit locally
 		this.emit("playerDropped", playerId, metadata);
@@ -656,13 +649,13 @@ export class Session {
 			return; // Host doesn't need to request sync
 		}
 
-		const syncRequest: Message = {
-			type: MessageType.SyncRequest,
-			playerId: this.localPlayerId,
-			desyncTick: this.engine.currentTick,
-			localHash: this.engine.getCurrentHash(),
-		};
-		this.sendToHost(syncRequest);
+		this.sendToHost(
+			createSyncRequest(
+				this.localPlayerId,
+				this.engine.currentTick,
+				this.engine.getCurrentHash(),
+			),
+		);
 	}
 
 	/**
@@ -683,6 +676,22 @@ export class Session {
 		handler: SessionEvents[E],
 	): void {
 		this.eventHandlers.get(event)?.delete(handler);
+	}
+
+	/**
+	 * Remove all event handlers.
+	 *
+	 * Optionally specify an event type to only remove handlers for that event.
+	 * Call this during cleanup to prevent memory leaks.
+	 *
+	 * @param event - Optional event type to clear handlers for
+	 */
+	removeAllListeners<E extends keyof SessionEvents>(event?: E): void {
+		if (event !== undefined) {
+			this.eventHandlers.delete(event);
+		} else {
+			this.eventHandlers.clear();
+		}
 	}
 
 	/**
@@ -724,11 +733,63 @@ export class Session {
 	}
 
 	/**
+	 * Valid state transitions for the session state machine.
+	 *
+	 * State machine:
+	 * ```
+	 *   Disconnected ──→ Connecting ──→ Lobby ──→ Playing ⇄ Paused
+	 *        ↑               │            │         │         │
+	 *        └───────────────┴────────────┴─────────┴─────────┘
+	 *                    (any state can go to Disconnected)
+	 * ```
+	 */
+	private static readonly VALID_TRANSITIONS = new Map<
+		SessionState,
+		Set<SessionState>
+	>([
+		[
+			SessionState.Disconnected,
+			new Set([SessionState.Connecting, SessionState.Lobby]),
+		],
+		[
+			SessionState.Connecting,
+			new Set([
+				SessionState.Lobby,
+				SessionState.Playing,
+				SessionState.Disconnected,
+			]),
+		],
+		[
+			SessionState.Lobby,
+			new Set([SessionState.Playing, SessionState.Disconnected]),
+		],
+		[
+			SessionState.Playing,
+			new Set([SessionState.Paused, SessionState.Disconnected]),
+		],
+		[
+			SessionState.Paused,
+			new Set([SessionState.Playing, SessionState.Disconnected]),
+		],
+	]);
+
+	/**
 	 * Update session state and emit event.
+	 * Validates that the transition is allowed by the state machine.
 	 */
 	private setState(newState: SessionState): void {
 		const oldState = this._state;
 		if (oldState === newState) return;
+
+		// Validate transition
+		const validNextStates = Session.VALID_TRANSITIONS.get(oldState);
+		if (!validNextStates?.has(newState)) {
+			this.debug.warn("Invalid state transition attempted", {
+				from: SessionState[oldState],
+				to: SessionState[newState],
+			});
+			// Still allow the transition for robustness, but log a warning
+		}
 
 		this._state = newState;
 		this.emit("stateChange", newState, oldState);
@@ -782,21 +843,10 @@ export class Session {
 
 		const playerId = asPlayerId(peerId);
 
-		// In mesh + host-authority mode, guests report to host instead of handling locally
-		if (
-			this.config.topology === Topology.Mesh &&
-			this.config.desyncAuthority === DesyncAuthority.Host
-		) {
-			if (!this._isHost) {
-				// Guest: report to host, don't handle locally yet
-				const report: Message = {
-					type: MessageType.DisconnectReport,
-					disconnectedPeerId: playerId,
-				};
-				this.sendToHost(report);
-				return;
-			}
-			// Host falls through to handle directly
+		// In host-authority mode, guests report to host instead of handling locally
+		if (this.desyncManager.isHostAuthority && !this._isHost) {
+			this.sendToHost(createDisconnectReport(playerId));
+			return;
 		}
 
 		// Host or star topology or peer mode: handle directly
@@ -821,17 +871,8 @@ export class Session {
 			this.emit("playerLeft", player);
 
 			// If host in host-authority mode, broadcast PlayerLeft to all
-			if (
-				this._isHost &&
-				this.config.topology === Topology.Mesh &&
-				this.config.desyncAuthority === DesyncAuthority.Host
-			) {
-				const leaveMsg: Message = {
-					type: MessageType.PlayerLeft,
-					playerId,
-					leaveTick: player.leaveTick,
-				};
-				this.broadcast(leaveMsg, true);
+			if (this._isHost && this.desyncManager.isHostAuthority) {
+				this.broadcast(createPlayerLeft(playerId, player.leaveTick), true);
 			}
 		}
 	}
@@ -887,12 +928,9 @@ export class Session {
 			);
 
 			if (lagReport) {
-				const lagReportMsg: Message = {
-					type: MessageType.LagReport,
-					laggyPlayerId: lagReport.laggyPlayerId,
-					ticksBehind: lagReport.ticksBehind,
-				};
-				this.sendToHost(lagReportMsg);
+				this.sendToHost(
+					createLagReport(lagReport.laggyPlayerId, lagReport.ticksBehind),
+				);
 
 				this.debug.log("Sent lag report", {
 					laggyPlayerId: lagReport.laggyPlayerId,
@@ -1049,13 +1087,12 @@ export class Session {
 		if (!this._isHost) return;
 
 		const state = this.engine.getState();
-		const syncMsg: Message = {
-			type: MessageType.Sync,
-			tick: state.tick,
-			state: state.state,
-			hash: this.engine.getCurrentHash(),
-			playerTimeline: state.playerTimeline,
-		};
+		const syncMsg = createSync(
+			state.tick,
+			state.state,
+			this.engine.getCurrentHash(),
+			state.playerTimeline,
+		);
 
 		// Send to the requesting player
 		this.sendToPeer(message.playerId, syncMsg, true);
@@ -1074,38 +1111,31 @@ export class Session {
 
 		// Check rate limiting
 		if (this.joinRateLimiter.checkAndRecord(peerId)) {
-			const rejectMsg: Message = {
-				type: MessageType.JoinReject,
-				playerId,
-				reason: "Too many join requests, please wait",
-			};
-			this.sendToPeer(peerId, rejectMsg, true);
+			this.sendToPeer(
+				peerId,
+				createJoinReject(playerId, "Too many join requests, please wait"),
+				true,
+			);
 			return;
 		}
 
 		// Check if room is full
 		if (this.playerManager.size >= this.config.maxPlayers) {
-			const rejectMsg: Message = {
-				type: MessageType.JoinReject,
-				playerId,
-				reason: "Room is full",
-			};
-			this.sendToPeer(peerId, rejectMsg, true);
+			this.sendToPeer(peerId, createJoinReject(playerId, "Room is full"), true);
 			return;
 		}
 
 		// Accept the join
-		const acceptMsg: Message = {
-			type: MessageType.JoinAccept,
-			playerId,
-			roomId: this._roomId,
-			config: {
-				tickRate: this.config.tickRate,
-				maxPlayers: this.config.maxPlayers,
-			},
-			players: this.playerManager.getPlayerIds(),
-		};
-		this.sendToPeer(peerId, acceptMsg, true);
+		this.sendToPeer(
+			peerId,
+			createJoinAccept(
+				playerId,
+				this._roomId,
+				{ tickRate: this.config.tickRate, maxPlayers: this.config.maxPlayers },
+				this.playerManager.getPlayerIds(),
+			),
+			true,
+		);
 
 		// Add player
 		const playerRole: PlayerRole = message.role ?? PlayerRole.Player;
@@ -1131,13 +1161,10 @@ export class Session {
 
 		// Notify other players
 		if (this._state === SessionState.Playing && playerInfo.joinTick !== null) {
-			const joinedMsg: Message = {
-				type: MessageType.PlayerJoined,
-				playerId,
-				joinTick: playerInfo.joinTick,
-				role: playerRole,
-			};
-			this.broadcast(joinedMsg, true);
+			this.broadcast(
+				createPlayerJoined(playerId, playerRole, playerInfo.joinTick),
+				true,
+			);
 		}
 
 		this.emit("playerJoined", playerInfo);
@@ -1239,11 +1266,11 @@ export class Session {
 		message: Message & { type: MessageType.Ping },
 	): void {
 		// Respond with pong containing the original timestamp
-		const pongMsg: Message = {
-			type: MessageType.Pong,
-			timestamp: message.timestamp,
-		};
-		this.transport.send(peerId, encodeMessage(pongMsg), false);
+		this.transport.send(
+			peerId,
+			encodeMessage(createPong(message.timestamp)),
+			false,
+		);
 	}
 
 	/**
@@ -1270,11 +1297,7 @@ export class Session {
 	 */
 	sendPing(peerId: string): void {
 		const timestamp = Date.now();
-		const pingMsg: Message = {
-			type: MessageType.Ping,
-			timestamp,
-		};
-		this.transport.send(peerId, encodeMessage(pingMsg), false);
+		this.transport.send(peerId, encodeMessage(createPing(timestamp)), false);
 
 		// Record the ping for RTT calculation if transport supports metrics
 		const transport = this.transport as {
@@ -1303,13 +1326,7 @@ export class Session {
 			}
 		}
 
-		const inputMsg: Message = {
-			type: MessageType.Input,
-			playerId: this.localPlayerId,
-			inputs,
-		};
-
-		this.broadcast(inputMsg, false);
+		this.broadcast(createInput(this.localPlayerId, inputs), false);
 	}
 
 	/**
@@ -1322,12 +1339,7 @@ export class Session {
 			this.lastHashBroadcastTick = currentTick;
 
 			const hash = this.engine.getCurrentHash();
-			const hashMsg: Message = {
-				type: MessageType.Hash,
-				playerId: this.localPlayerId,
-				tick: currentTick,
-				hash,
-			};
+			const hashMsg = createHash(this.localPlayerId, currentTick, hash);
 
 			// Host-authority in mesh: guests send to host only, host collects
 			if (this.desyncManager.isHostAuthority) {
@@ -1377,14 +1389,16 @@ export class Session {
 
 			// Send authoritative state to desynced player
 			const state = this.engine.getState();
-			const syncMsg: Message = {
-				type: MessageType.Sync,
-				tick: state.tick,
-				state: state.state,
-				hash: this.engine.getCurrentHash(),
-				playerTimeline: state.playerTimeline,
-			};
-			this.sendToPeer(desync.desyncedPlayerId, syncMsg, true);
+			this.sendToPeer(
+				desync.desyncedPlayerId,
+				createSync(
+					state.tick,
+					state.state,
+					this.engine.getCurrentHash(),
+					state.playerTimeline,
+				),
+				true,
+			);
 		}
 
 		// Cleanup old tick entries
