@@ -14,6 +14,14 @@ import { asTick } from "../types.js";
  * Snapshots are stored at specific ticks and can be retrieved by tick.
  * When the buffer is full, the oldest snapshot is evicted.
  * Uses a tick-to-index map for O(1) lookup performance.
+ *
+ * INVARIANT: Snapshots must be saved in ascending tick order. This is required
+ * for O(log n) binary search in getAtOrBefore(). The invariant is maintained by:
+ * - Normal simulation: ticks advance sequentially (0, 1, 2, ...)
+ * - Resimulation: existing ticks are updated in-place, preserving order
+ *
+ * Saving a non-existing tick out of order will corrupt the sort order and
+ * cause getAtOrBefore() to return incorrect results.
  */
 export class SnapshotBuffer {
 	private readonly buffer: (Snapshot | undefined)[];
@@ -59,8 +67,12 @@ export class SnapshotBuffer {
 	/**
 	 * Save a snapshot at a specific tick.
 	 *
+	 * If the tick already exists, updates in-place to maintain sort order.
 	 * If the buffer is full, the oldest snapshot is evicted.
 	 * The state is copied to prevent external mutation.
+	 *
+	 * PRECONDITION: New ticks (not already in buffer) must be >= all existing ticks.
+	 * Saving an out-of-order new tick corrupts sort order. See class invariant.
 	 *
 	 * @param tick - The tick this snapshot was taken at
 	 * @param state - The serialized game state
@@ -77,7 +89,14 @@ export class SnapshotBuffer {
 			hash,
 		};
 
-		// If buffer is full, we're overwriting the oldest
+		// Check if this tick already exists - update in-place to maintain order
+		const existingIdx = this.tickToIndex.get(tick);
+		if (existingIdx !== undefined) {
+			this.buffer[existingIdx] = snapshot;
+			return;
+		}
+
+		// New tick - append or evict oldest
 		if (this.count === this.capacity) {
 			// Remove old tick from index map
 			const oldSnapshot = this.buffer[this.head];
@@ -162,6 +181,8 @@ export class SnapshotBuffer {
 	 * Get the snapshot at or before a given tick.
 	 * Useful for finding the closest snapshot for rollback.
 	 *
+	 * O(log n) binary search. Snapshots are stored in ascending tick order.
+	 *
 	 * @param tick - The target tick
 	 * @returns The snapshot at or before that tick, or undefined if none exists
 	 */
@@ -170,19 +191,28 @@ export class SnapshotBuffer {
 			return undefined;
 		}
 
-		let best: Snapshot | undefined;
+		// Binary search to find the rightmost snapshot with tick <= target
+		// Logical indices: 0 to count-1, physical: (head + logical) % capacity
+		let lo = 0;
+		let hi = this.count - 1;
+		let result: Snapshot | undefined;
 
-		for (let i = 0; i < this.count; i++) {
-			const idx = (this.head + i) % this.capacity;
+		while (lo <= hi) {
+			const mid = (lo + hi) >>> 1;
+			const idx = (this.head + mid) % this.capacity;
 			const snapshot = this.buffer[idx];
+
 			if (snapshot && snapshot.tick <= tick) {
-				if (!best || snapshot.tick > best.tick) {
-					best = snapshot;
-				}
+				// This snapshot is valid, but there might be a better one to the right
+				result = snapshot;
+				lo = mid + 1;
+			} else {
+				// Snapshot tick is too high, search left
+				hi = mid - 1;
 			}
 		}
 
-		return best;
+		return result;
 	}
 
 	/**

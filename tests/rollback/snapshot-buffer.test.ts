@@ -82,6 +82,31 @@ describe("SnapshotBuffer", () => {
 			const buffer = new SnapshotBuffer(5);
 			assert.strictEqual(buffer.get(asTick(0)), undefined);
 		});
+
+		it("should update in-place when saving existing tick", () => {
+			const buffer = new SnapshotBuffer(5);
+
+			buffer.save(asTick(0), new Uint8Array([0]), 100);
+			buffer.save(asTick(1), new Uint8Array([1]), 101);
+			buffer.save(asTick(2), new Uint8Array([2]), 102);
+
+			// Re-save tick 1 with different state/hash
+			buffer.save(asTick(1), new Uint8Array([99]), 999);
+
+			// Size should not increase
+			assert.strictEqual(buffer.size, 3);
+
+			// Should get updated values
+			const snapshot = buffer.get(asTick(1));
+			assert.ok(snapshot);
+			assert.deepStrictEqual(snapshot.state, new Uint8Array([99]));
+			assert.strictEqual(snapshot.hash, 999);
+
+			// Order should be maintained for binary search
+			const atOrBefore = buffer.getAtOrBefore(asTick(1));
+			assert.ok(atOrBefore);
+			assert.strictEqual(atOrBefore.tick, 1);
+		});
 	});
 
 	describe("ring buffer wrap-around", () => {
