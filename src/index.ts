@@ -70,6 +70,11 @@ export type {
 	WebRTCTransportConfig,
 	SignalingCallbacks,
 } from "./transport/webrtc.js";
+export {
+	TransformingTransport,
+	DEFAULT_TRANSFORMING_TRANSPORT_CONFIG,
+} from "./transport/transforming.js";
+export type { TransformingTransportConfig } from "./transport/transforming.js";
 
 // Protocol encoding (for custom transport implementations)
 export {
