@@ -174,7 +174,9 @@ interface TransformingTransportConfig {
 
 ## Network Topology
 
-### Star Topology (Default)
+The library supports two network topologies, each with different tradeoffs.
+
+### Star Topology (Recommended)
 
 ```
      Player 2
@@ -186,11 +188,15 @@ Player 1 ◄──► Host ◄──► Player 3
             Player 4
 ```
 
-- All traffic routes through host
-- Host relays inputs between clients
-- Simpler: N-1 connections
-- Host has latency advantage
-- If host disconnects, session ends
+All players connect only to the host. The host relays messages between players.
+
+| Aspect | Star |
+|--------|------|
+| **Connections** | N-1 (linear scaling) |
+| **Latency** | Higher between non-host players (relay through host) |
+| **Reliability** | Host is single point of failure |
+| **Complexity** | Simple connection management |
+| **Best for** | 4+ players, typical multiplayer games |
 
 ### Mesh Topology
 
@@ -206,10 +212,29 @@ Player 1 ◄───────► Player 2
 Player 3 ◄───────► Player 4
 ```
 
-- Direct connections between all peers
-- Lower latency between any two players
-- More connections: N×(N-1)/2
-- More complex, but more resilient
+Every player connects directly to every other player.
+
+| Aspect | Mesh |
+|--------|------|
+| **Connections** | N×(N-1)/2 (quadratic scaling) |
+| **Latency** | Lower between all players (direct connections) |
+| **Reliability** | No single point of failure |
+| **Complexity** | Complex connection management |
+| **Best for** | 2-4 players where latency is critical (e.g., fighting games) |
+
+### Scaling Comparison
+
+| Players | Star Connections | Mesh Connections |
+|---------|------------------|------------------|
+| 2       | 1                | 1                |
+| 4       | 3                | 6                |
+| 8       | 7                | 28               |
+| 16      | 15               | 120              |
+
+> **Warning:** Mesh topology scales poorly. Each player must maintain connections
+> to all other players, and each connection requires WebRTC negotiation, ICE
+> candidate exchange, and ongoing keepalive traffic. **Mesh with more than 4
+> players is not recommended.** Use Star topology for larger games.
 
 ## Dynamic Join/Leave
 

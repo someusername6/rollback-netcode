@@ -186,6 +186,18 @@ export class Session {
 		// Create debug logger
 		this.debug = createDebugLogger(this.config.debug);
 
+		// Warn about Mesh topology with many players
+		if (
+			this.config.topology === Topology.Mesh &&
+			this.config.maxPlayers > 4
+		) {
+			console.warn(
+				"[rollback-netcode] Mesh topology with >4 players is not recommended. " +
+					"Mesh requires N×(N-1)/2 connections which scales poorly. " +
+					"Consider using Star topology for better performance.",
+			);
+		}
+
 		// Initialize extracted components
 		this.playerManager = new PlayerManager();
 		this.desyncManager = new DesyncManager({
