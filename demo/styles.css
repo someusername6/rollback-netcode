@@ -1,0 +1,204 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif;
+  background: #0f0f1a;
+  color: #e0e0e0;
+  min-height: 100vh;
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+header {
+  text-align: center;
+  margin-bottom: 24px;
+}
+
+header h1 {
+  font-size: 2rem;
+  color: #fff;
+  margin-bottom: 8px;
+}
+
+header .subtitle {
+  color: #888;
+  font-size: 0.95rem;
+}
+
+header a {
+  color: #3498db;
+  text-decoration: none;
+}
+
+header a:hover {
+  text-decoration: underline;
+}
+
+.controls {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+  padding: 16px;
+  background: #1a1a2e;
+  border-radius: 8px;
+}
+
+.control-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.control-group label {
+  font-size: 0.9rem;
+  color: #aaa;
+}
+
+.control-group select {
+  padding: 8px 12px;
+  font-size: 0.9rem;
+  border: 1px solid #333;
+  border-radius: 4px;
+  background: #252540;
+  color: #e0e0e0;
+  cursor: pointer;
+}
+
+.control-group select:focus {
+  outline: none;
+  border-color: #3498db;
+}
+
+.btn-primary {
+  padding: 10px 20px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  border: none;
+  border-radius: 4px;
+  background: #3498db;
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-primary:hover {
+  background: #2980b9;
+}
+
+.instructions {
+  background: #1a1a2e;
+  padding: 16px;
+  border-radius: 8px;
+  margin-bottom: 24px;
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.instructions p {
+  margin-bottom: 8px;
+}
+
+.instructions p:last-child {
+  margin-bottom: 0;
+}
+
+.instructions strong {
+  color: #fff;
+}
+
+.players-container {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  justify-content: center;
+}
+
+.player-panel {
+  background: #1a1a2e;
+  border: 2px solid #333;
+  border-radius: 8px;
+  overflow: hidden;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.player-panel.active {
+  border-color: #3498db;
+  box-shadow: 0 0 12px rgba(52, 152, 219, 0.3);
+}
+
+.player-panel.desync {
+  animation: desync-flash 0.5s ease-out;
+}
+
+@keyframes desync-flash {
+  0% {
+    border-color: #e74c3c;
+    box-shadow: 0 0 20px rgba(231, 76, 60, 0.6);
+  }
+  100% {
+    border-color: #333;
+    box-shadow: none;
+  }
+}
+
+.player-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  background: #252540;
+  border-bottom: 1px solid #333;
+}
+
+.player-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.player-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.player-buttons button {
+  padding: 5px 10px;
+  font-size: 0.75rem;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-desync {
+  background: #f39c12;
+  color: #000;
+}
+
+.btn-desync:hover {
+  background: #e67e22;
+}
+
+.btn-disconnect {
+  background: #e74c3c;
+  color: #fff;
+}
+
+.btn-disconnect:hover {
+  background: #c0392b;
+}
+
+.game-canvas {
+  display: block;
+  cursor: pointer;
+}

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rollback Netcode Demo</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Rollback Netcode Demo</h1>
+      <p class="subtitle">
+        Test the <a href="https://github.com/someusername6/rollback-netcode">rollback-netcode</a> library locally
+      </p>
+    </header>
+
+    <div class="controls">
+      <div class="control-group">
+        <label for="topology">Topology:</label>
+        <select id="topology">
+          <option value="star" selected>Star</option>
+          <option value="mesh">Mesh</option>
+        </select>
+      </div>
+
+      <div class="control-group">
+        <label for="authority">Desync Authority:</label>
+        <select id="authority">
+          <option value="host" selected>Host</option>
+          <option value="peer">Peer</option>
+        </select>
+      </div>
+
+      <button id="add-player" class="btn-primary">Add Player</button>
+    </div>
+
+    <div class="instructions">
+      <p>
+        <strong>Instructions:</strong>
+        Click "Add Player" to create players. Click a canvas to select it, then use arrow keys to move.
+        Each canvas shows the same world state from that player's perspective.
+      </p>
+      <p>
+        <strong>Induce Desync:</strong> Corrupts that player's local state to trigger desync detection.
+        <strong>Disconnect:</strong> Removes the player from the session.
+      </p>
+    </div>
+
+    <div id="players-container" class="players-container"></div>
+  </div>
+
+  <script type="module" src="demo.js"></script>
+</body>
+</html>

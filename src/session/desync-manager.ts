@@ -75,6 +75,8 @@ export class DesyncManager {
 	 * Whether this is host-authority mode.
 	 */
 	get isHostAuthority(): boolean {
+		// Only Mesh + Host authority uses host-authority mode
+		// Star topology and Mesh + Peer use peer-based detection
 		return (
 			this.topology === Topology.Mesh &&
 			this.desyncAuthority === DesyncAuthority.Host

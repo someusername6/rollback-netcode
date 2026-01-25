@@ -118,12 +118,15 @@ describe("Message Encoding/Decoding", () => {
 			}
 		});
 
-		it("should handle negative hash values", () => {
+		it("should handle large unsigned hash values", () => {
+			// Hash values are unsigned (game.hash() returns h >>> 0)
+			// Test with a value > 2^31-1 to ensure unsigned handling
+			const largeHash = 3742115636; // This caused signed/unsigned bugs previously
 			const original = {
 				type: MessageType.Hash as const,
 				playerId: asPlayerId("p1"),
 				tick: asTick(1),
-				hash: -12345,
+				hash: largeHash,
 			};
 
 			const encoded = encodeMessage(original);
@@ -131,7 +134,7 @@ describe("Message Encoding/Decoding", () => {
 
 			assert.strictEqual(decoded.type, MessageType.Hash);
 			if (decoded.type === MessageType.Hash) {
-				assert.strictEqual(decoded.hash, -12345);
+				assert.strictEqual(decoded.hash, largeHash);
 			}
 		});
 	});

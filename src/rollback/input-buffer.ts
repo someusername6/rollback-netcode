@@ -97,6 +97,30 @@ export class InputBuffer {
 	}
 
 	/**
+	 * Set the confirmed tick for all active players to a specific value.
+	 * Used after a state sync to indicate that all inputs up to that tick
+	 * are implicitly confirmed by the synced state.
+	 *
+	 * @param tick - The tick to set as confirmed for all active players
+	 */
+	setConfirmedTickForSync(tick: Tick): void {
+		// Guard against underflow when tick is 0 or negative
+		if (tick <= 0) {
+			return;
+		}
+		const confirmedTick = asTick(tick - 1);
+		for (const player of this.players.values()) {
+			// Only update if the player was active at or before this tick
+			if (player.leaveTick === null || player.leaveTick > tick) {
+				// Set confirmed tick to tick-1 (the state represents confirmed state)
+				if (player.confirmedTick < confirmedTick) {
+					player.confirmedTick = confirmedTick;
+				}
+			}
+		}
+	}
+
+	/**
 	 * Check if a player is active at a given tick.
 	 *
 	 * @param playerId - The player's ID

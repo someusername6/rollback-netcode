@@ -21,6 +21,11 @@ import { SnapshotBuffer } from "./snapshot-buffer.js";
 const PRUNE_BUFFER_TICKS = 10;
 
 /**
+ * Callback for player lifecycle events during resimulation.
+ */
+export type PlayerLifecycleCallback = (playerId: PlayerId, tick: Tick) => void;
+
+/**
  * Configuration for the rollback engine.
  */
 export interface RollbackEngineConfig {
@@ -38,6 +43,18 @@ export interface RollbackEngineConfig {
 
 	/** Input predictor for remote players */
 	inputPredictor?: InputPredictor<Uint8Array>;
+
+	/**
+	 * Callback invoked when a player should be added during resimulation.
+	 * Called when resimulating past a player's joinTick.
+	 */
+	onPlayerAddDuringResimulation?: PlayerLifecycleCallback;
+
+	/**
+	 * Callback invoked when a player should be removed during resimulation.
+	 * Called when resimulating past a player's leaveTick.
+	 */
+	onPlayerRemoveDuringResimulation?: PlayerLifecycleCallback;
 }
 
 /**
@@ -50,6 +67,12 @@ export class RollbackEngine {
 	private readonly inputBuffer: InputBuffer;
 	private readonly inputPredictor: InputPredictor<Uint8Array>;
 	private readonly maxSpeculationTicks: number;
+	private readonly onPlayerAddDuringResimulation:
+		| PlayerLifecycleCallback
+		| undefined;
+	private readonly onPlayerRemoveDuringResimulation:
+		| PlayerLifecycleCallback
+		| undefined;
 
 	private _currentTick: Tick;
 	private _confirmedTick: Tick;
@@ -63,6 +86,9 @@ export class RollbackEngine {
 		this.localPlayerId = config.localPlayerId;
 		this.maxSpeculationTicks = config.maxSpeculationTicks ?? 60;
 		this.inputPredictor = config.inputPredictor ?? DEFAULT_INPUT_PREDICTOR;
+		this.onPlayerAddDuringResimulation = config.onPlayerAddDuringResimulation;
+		this.onPlayerRemoveDuringResimulation =
+			config.onPlayerRemoveDuringResimulation;
 
 		this.snapshotBuffer = new SnapshotBuffer(config.snapshotHistorySize ?? 120);
 		this.inputBuffer = new InputBuffer();
@@ -299,19 +325,56 @@ export class RollbackEngine {
 
 		// Resimulate from misprediction tick to current tick
 		for (let tick = earliestMisprediction; tick < this._currentTick; tick++) {
-			const inputs = this.gatherInputs(asTick(tick));
+			const tickAsTick = asTick(tick);
+
+			// Handle player lifecycle events at this tick
+			this.handlePlayerLifecycleAtTick(tickAsTick);
+
+			const inputs = this.gatherInputs(tickAsTick);
 			this.game.step(inputs);
 
 			// Update snapshot
 			const state = this.game.serialize();
 			const hash = this.game.hash();
-			this.snapshotBuffer.save(asTick(tick), state, hash);
+			this.snapshotBuffer.save(tickAsTick, state, hash);
 		}
 
 		return {
 			rolledBack: true,
 			rollbackTicks: ticksToResimulate,
 		};
+	}
+
+	/**
+	 * Handle player add/remove lifecycle events at a specific tick during resimulation.
+	 * This ensures the game layer knows about player joins/leaves when replaying history.
+	 */
+	private handlePlayerLifecycleAtTick(tick: Tick): void {
+		if (
+			!this.onPlayerAddDuringResimulation &&
+			!this.onPlayerRemoveDuringResimulation
+		) {
+			return;
+		}
+
+		const allPlayers = this.inputBuffer.getAllPlayers();
+		for (const playerId of allPlayers) {
+			// Check if player joins at this tick
+			if (this.onPlayerAddDuringResimulation) {
+				const joinTick = this.inputBuffer.getJoinTick(playerId);
+				if (joinTick === tick) {
+					this.onPlayerAddDuringResimulation(playerId, tick);
+				}
+			}
+
+			// Check if player leaves at this tick
+			if (this.onPlayerRemoveDuringResimulation) {
+				const leaveTick = this.inputBuffer.getLeaveTick(playerId);
+				if (leaveTick === tick) {
+					this.onPlayerRemoveDuringResimulation(playerId, tick);
+				}
+			}
+		}
 	}
 
 	/**
@@ -452,6 +515,12 @@ export class RollbackEngine {
 			}
 		}
 
+		// Set confirmed tick for all active players to tick-1
+		// This is critical for mid-game joins: the synced state represents
+		// a confirmed state, so all players who contributed to it have
+		// implicitly confirmed inputs up to that point
+		this.inputBuffer.setConfirmedTickForSync(tick);
+
 		// Save initial snapshot at tick - 1 (state before any simulation)
 		// This is needed so we can rollback tick 0 if there's a misprediction
 		const hash = this.game.hash();
@@ -469,6 +538,26 @@ export class RollbackEngine {
 	 * @returns true if all inputs are available
 	 */
 	hasAllInputsForTick(tick: Tick): boolean {
+		return this.inputBuffer.hasAllInputsForTick(tick);
+	}
+
+	/**
+	 * Check if a tick is "settled" - meaning we've simulated past it
+	 * and have all confirmed inputs for it.
+	 *
+	 * A settled tick's state is stable and won't change from future rollbacks,
+	 * making it safe to compare hashes for desync detection.
+	 *
+	 * @param tick - The tick to check
+	 * @param currentTick - The current simulation tick
+	 * @returns true if the tick is settled
+	 */
+	isTickSettled(tick: Tick, currentTick: Tick): boolean {
+		// Must have simulated past this tick
+		if (tick >= currentTick) {
+			return false;
+		}
+		// Must have all inputs confirmed
 		return this.inputBuffer.hasAllInputsForTick(tick);
 	}
 

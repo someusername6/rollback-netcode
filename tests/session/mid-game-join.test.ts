@@ -228,4 +228,100 @@ describe("Mid-game join", () => {
     hostSession.destroy();
     guestSession.destroy();
   });
+
+  it("should preserve mid-game joined players after rollback", async () => {
+    // This test verifies that when a rollback occurs past a player's joinTick,
+    // the player is re-added during resimulation via the playerJoined callback.
+
+    const hostGame = new MultiPlayerGame();
+    const hostTransport = new LocalTransport("host");
+    const hostSession = createSession({
+      game: hostGame,
+      transport: hostTransport,
+    });
+
+    // Track playerJoined calls to verify re-emission during resimulation
+    let hostPlayerJoinedCount = 0;
+    hostSession.on("playerJoined", (info) => {
+      hostPlayerJoinedCount++;
+      hostGame.addPlayer(info.id);
+    });
+
+    await hostSession.createRoom();
+    hostGame.addPlayer("host", 50, 50);
+    hostSession.start();
+
+    // Host runs ahead - takes snapshots with only host player
+    for (let i = 0; i < 20; i++) {
+      hostSession.tick(new Uint8Array([128, 128]));
+    }
+
+    // Guest joins at tick 20
+    const guestGame = new MultiPlayerGame();
+    const guestTransport = new LocalTransport("guest");
+    const guestSession = createSession({
+      game: guestGame,
+      transport: guestTransport,
+    });
+
+    guestSession.on("playerJoined", (info) => {
+      guestGame.addPlayer(info.id);
+    });
+
+    LocalTransport.link(hostTransport, guestTransport);
+    await guestSession.joinRoom("room", "host");
+    flushTransports([hostTransport, guestTransport]);
+
+    // Verify both players exist on host
+    assert.ok(hostGame.players.has("host"), "Host should have host player");
+    assert.ok(hostGame.players.has("guest"), "Host should have guest player after join");
+    const joinedCountAfterJoin = hostPlayerJoinedCount;
+
+    // Now simulate late input arrival that triggers rollback:
+    // 1. Host ticks forward WITHOUT receiving guest's inputs
+    // 2. Then flush to deliver guest's (now late) inputs
+    // 3. This triggers rollback to before guest joined
+
+    // Host ticks forward (predicting guest's inputs)
+    for (let i = 0; i < 10; i++) {
+      hostSession.tick(new Uint8Array([128, 128]));
+      // Only flush host -> guest, not guest -> host
+      hostTransport.flush();
+    }
+
+    // Guest ticks and sends inputs
+    for (let i = 0; i < 10; i++) {
+      guestSession.tick(new Uint8Array([130, 130])); // Different input to cause misprediction
+      guestTransport.flush();
+    }
+
+    // Now deliver guest's late inputs to host - this should trigger rollback
+    for (let i = 0; i < 5; i++) {
+      hostTransport.flush();
+      guestTransport.flush();
+    }
+
+    // Host processes the late inputs (causes rollback + resimulation)
+    hostSession.tick(new Uint8Array([128, 128]));
+    flushTransports([hostTransport, guestTransport]);
+
+    // After rollback and resimulation, host should STILL have both players
+    assert.ok(
+      hostGame.players.has("host"),
+      "Host should still have host player after rollback"
+    );
+    assert.ok(
+      hostGame.players.has("guest"),
+      "Host should still have guest player after rollback (re-added during resimulation)"
+    );
+
+    // playerJoined should have been called again during resimulation
+    assert.ok(
+      hostPlayerJoinedCount > joinedCountAfterJoin,
+      "playerJoined should be re-emitted during resimulation"
+    );
+
+    hostSession.destroy();
+    guestSession.destroy();
+  });
 });

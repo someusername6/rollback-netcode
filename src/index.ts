@@ -85,28 +85,30 @@ export {
 export { MessageType } from "./protocol/messages.js";
 export type { Message } from "./protocol/messages.js";
 
-// Core types
+// Core types (interfaces and type aliases)
 export type {
-	DesyncAuthority,
 	Game,
 	PlayerId,
-	PlayerRole,
 	Tick,
 	TickResult,
 	SessionConfig,
-	SessionState,
 	SessionEvents,
 	PlayerInfo,
 	InputPredictor,
 	Snapshot,
 	PlayerTimeline,
 	ErrorContext,
-	ErrorSource,
-	PauseReason,
-	Topology,
 } from "./types.js";
 
+// Enums and values from types
 export {
+	Topology,
+	DesyncAuthority,
+	SessionState,
+	PlayerRole,
+	ErrorSource,
+	PauseReason,
+	PlayerConnectionState,
 	asPlayerId,
 	asTick,
 	playerIdToPeerId,

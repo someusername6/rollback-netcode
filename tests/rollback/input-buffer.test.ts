@@ -218,6 +218,79 @@ describe("InputBuffer", () => {
 		});
 	});
 
+	describe("setConfirmedTickForSync", () => {
+		it("should set confirmed tick for all active players", () => {
+			const buffer = new InputBuffer();
+			const p1 = asPlayerId("p1");
+			const p2 = asPlayerId("p2");
+
+			buffer.addPlayer(p1, asTick(0));
+			buffer.addPlayer(p2, asTick(0));
+
+			// Initially confirmed tick is joinTick - 1 = -1
+			assert.strictEqual(buffer.getConfirmedTick(p1), -1);
+			assert.strictEqual(buffer.getConfirmedTick(p2), -1);
+
+			// Set confirmed tick for sync at tick 10
+			// This should set confirmedTick to 9 (tick - 1)
+			buffer.setConfirmedTickForSync(asTick(10));
+
+			assert.strictEqual(buffer.getConfirmedTick(p1), 9);
+			assert.strictEqual(buffer.getConfirmedTick(p2), 9);
+		});
+
+		it("should not update if tick is 0 (underflow guard)", () => {
+			const buffer = new InputBuffer();
+			const p1 = asPlayerId("p1");
+
+			buffer.addPlayer(p1, asTick(5));
+			// Initial confirmed tick is 4 (joinTick - 1)
+			assert.strictEqual(buffer.getConfirmedTick(p1), 4);
+
+			// Calling with tick 0 should be a no-op
+			buffer.setConfirmedTickForSync(asTick(0));
+
+			// Confirmed tick should remain unchanged
+			assert.strictEqual(buffer.getConfirmedTick(p1), 4);
+		});
+
+		it("should not update if new confirmed tick is less than current", () => {
+			const buffer = new InputBuffer();
+			const p1 = asPlayerId("p1");
+
+			buffer.addPlayer(p1, asTick(0));
+
+			// Receive inputs to advance confirmed tick to 10
+			for (let i = 0; i <= 10; i++) {
+				buffer.receiveInput(p1, asTick(i), new Uint8Array([i]));
+			}
+			assert.strictEqual(buffer.getConfirmedTick(p1), 10);
+
+			// Setting sync at tick 5 should not lower confirmed tick
+			buffer.setConfirmedTickForSync(asTick(5));
+
+			assert.strictEqual(buffer.getConfirmedTick(p1), 10);
+		});
+
+		it("should not update players that left before the sync tick", () => {
+			const buffer = new InputBuffer();
+			const p1 = asPlayerId("p1");
+			const p2 = asPlayerId("p2");
+
+			buffer.addPlayer(p1, asTick(0));
+			buffer.addPlayer(p2, asTick(0));
+			buffer.removePlayer(p2, asTick(5)); // p2 leaves at tick 5
+
+			// Set sync at tick 10 - p2 had already left
+			buffer.setConfirmedTickForSync(asTick(10));
+
+			// p1 should be updated
+			assert.strictEqual(buffer.getConfirmedTick(p1), 9);
+			// p2 should not be updated (was not active at tick 10)
+			assert.strictEqual(buffer.getConfirmedTick(p2), -1);
+		});
+	});
+
 	describe("usedInputs and misprediction", () => {
 		it("should record and retrieve used inputs", () => {
 			const buffer = new InputBuffer();

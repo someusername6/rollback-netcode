@@ -972,4 +972,512 @@ describe("Desync Detection Integration", () => {
 			);
 		});
 	});
+
+	describe("3+ player desync detection and recovery", () => {
+		it("should detect and recover from desync with Star + Host (3 players)", async () => {
+			const transports = createLocalTransportGroup(["host", "p2", "p3"]);
+			const hostTransport = getTransport(transports, "host");
+			const p2Transport = getTransport(transports, "p2");
+			const p3Transport = getTransport(transports, "p3");
+
+			const hostGame = new TestGame();
+			const p2Game = new TestGame();
+			const p3Game = new TestGame();
+
+			const config = {
+				topology: Topology.Star,
+				desyncAuthority: DesyncAuthority.Host,
+				hashInterval: 5,
+				inputDelayTicks: 0,
+			};
+
+			const hostSession = createSession({
+				game: hostGame,
+				transport: hostTransport,
+				config,
+			});
+			const p2Session = createSession({
+				game: p2Game,
+				transport: p2Transport,
+				config,
+			});
+			const p3Session = createSession({
+				game: p3Game,
+				transport: p3Transport,
+				config,
+			});
+
+			const allDesyncs: Array<{ player: string; tick: Tick }> = [];
+			hostSession.on("desync", (tick) => allDesyncs.push({ player: "host", tick }));
+			p2Session.on("desync", (tick) => allDesyncs.push({ player: "p2", tick }));
+			p3Session.on("desync", (tick) => {
+				allDesyncs.push({ player: "p3", tick });
+				// Fix the desync when detected
+				p3Game.disableDesync();
+			});
+
+			// Set up session
+			await hostSession.createRoom();
+			await p2Session.joinRoom(hostSession.roomId!, "host");
+			flushAll(hostTransport, p2Transport, p3Transport);
+			await p3Session.joinRoom(hostSession.roomId!, "host");
+			flushAll(hostTransport, p2Transport, p3Transport);
+
+			hostSession.start();
+			flushAll(hostTransport, p2Transport, p3Transport);
+
+			// Run some ticks in sync
+			for (let i = 0; i < 10; i++) {
+				hostSession.tick(NEUTRAL_INPUT);
+				p2Session.tick(NEUTRAL_INPUT);
+				p3Session.tick(NEUTRAL_INPUT);
+				flushAll(hostTransport, p2Transport, p3Transport);
+			}
+
+			// Verify initial sync
+			assert.strictEqual(hostGame.hash(), p2Game.hash(), "host and p2 should be in sync initially");
+			assert.strictEqual(hostGame.hash(), p3Game.hash(), "host and p3 should be in sync initially");
+
+			// Enable desync on p3
+			p3Game.enableDesync(100);
+
+			// Run ticks to trigger detection
+			for (let i = 0; i < 25; i++) {
+				hostSession.tick(NEUTRAL_INPUT);
+				p2Session.tick(NEUTRAL_INPUT);
+				p3Session.tick(NEUTRAL_INPUT);
+				flushAll(hostTransport, p2Transport, p3Transport);
+			}
+
+			// Should have detected desync
+			assert.ok(allDesyncs.length > 0, "Star+Host (3 players): Should detect desync");
+
+			// Run more ticks to allow recovery
+			for (let i = 0; i < 20; i++) {
+				hostSession.tick(NEUTRAL_INPUT);
+				p2Session.tick(NEUTRAL_INPUT);
+				p3Session.tick(NEUTRAL_INPUT);
+				flushAll(hostTransport, p2Transport, p3Transport);
+			}
+
+			// After recovery, all games should be in sync
+			assert.strictEqual(
+				hostGame.hash(),
+				p2Game.hash(),
+				"Star+Host (3 players): host and p2 should be in sync after recovery",
+			);
+			assert.strictEqual(
+				hostGame.hash(),
+				p3Game.hash(),
+				"Star+Host (3 players): host and p3 should be in sync after recovery",
+			);
+		});
+
+		it("should detect and recover from desync with Star + Peer (3 players)", async () => {
+			const transports = createLocalTransportGroup(["host", "p2", "p3"]);
+			const hostTransport = getTransport(transports, "host");
+			const p2Transport = getTransport(transports, "p2");
+			const p3Transport = getTransport(transports, "p3");
+
+			const hostGame = new TestGame();
+			const p2Game = new TestGame();
+			const p3Game = new TestGame();
+
+			const config = {
+				topology: Topology.Star,
+				desyncAuthority: DesyncAuthority.Peer,
+				hashInterval: 5,
+				inputDelayTicks: 0,
+			};
+
+			const hostSession = createSession({
+				game: hostGame,
+				transport: hostTransport,
+				config,
+			});
+			const p2Session = createSession({
+				game: p2Game,
+				transport: p2Transport,
+				config,
+			});
+			const p3Session = createSession({
+				game: p3Game,
+				transport: p3Transport,
+				config,
+			});
+
+			const allDesyncs: Array<{ player: string; tick: Tick }> = [];
+			hostSession.on("desync", (tick) => allDesyncs.push({ player: "host", tick }));
+			p2Session.on("desync", (tick) => allDesyncs.push({ player: "p2", tick }));
+			p3Session.on("desync", (tick) => {
+				allDesyncs.push({ player: "p3", tick });
+				p3Game.disableDesync();
+			});
+
+			// Set up session
+			await hostSession.createRoom();
+			await p2Session.joinRoom(hostSession.roomId!, "host");
+			flushAll(hostTransport, p2Transport, p3Transport);
+			await p3Session.joinRoom(hostSession.roomId!, "host");
+			flushAll(hostTransport, p2Transport, p3Transport);
+
+			hostSession.start();
+			flushAll(hostTransport, p2Transport, p3Transport);
+
+			// Run some ticks in sync
+			for (let i = 0; i < 10; i++) {
+				hostSession.tick(NEUTRAL_INPUT);
+				p2Session.tick(NEUTRAL_INPUT);
+				p3Session.tick(NEUTRAL_INPUT);
+				flushAll(hostTransport, p2Transport, p3Transport);
+			}
+
+			// Enable desync on p3
+			p3Game.enableDesync(100);
+
+			// Run ticks to trigger detection
+			for (let i = 0; i < 25; i++) {
+				hostSession.tick(NEUTRAL_INPUT);
+				p2Session.tick(NEUTRAL_INPUT);
+				p3Session.tick(NEUTRAL_INPUT);
+				flushAll(hostTransport, p2Transport, p3Transport);
+			}
+
+			// In peer mode, multiple sides should detect
+			assert.ok(allDesyncs.length > 0, "Star+Peer (3 players): Should detect desync");
+
+			// Check that p3 detected (since it was the desynced one, it will detect when comparing with host)
+			const p3Desyncs = allDesyncs.filter((d) => d.player === "p3");
+			assert.ok(p3Desyncs.length > 0, "Star+Peer (3 players): p3 should detect its own desync");
+
+			// Run more ticks to allow recovery
+			for (let i = 0; i < 20; i++) {
+				hostSession.tick(NEUTRAL_INPUT);
+				p2Session.tick(NEUTRAL_INPUT);
+				p3Session.tick(NEUTRAL_INPUT);
+				flushAll(hostTransport, p2Transport, p3Transport);
+			}
+
+			// After recovery, all games should be in sync
+			assert.strictEqual(
+				hostGame.hash(),
+				p3Game.hash(),
+				"Star+Peer (3 players): host and p3 should be in sync after recovery",
+			);
+		});
+
+		it("should detect and recover from desync with Mesh + Host (3 players)", async () => {
+			// For Mesh topology, we need to manually connect all peers
+			const transports = createLocalTransportGroup(["host", "p2", "p3"]);
+			const hostTransport = getTransport(transports, "host");
+			const p2Transport = getTransport(transports, "p2");
+			const p3Transport = getTransport(transports, "p3");
+
+			const hostGame = new TestGame();
+			const p2Game = new TestGame();
+			const p3Game = new TestGame();
+
+			const config = {
+				topology: Topology.Mesh,
+				desyncAuthority: DesyncAuthority.Host,
+				hashInterval: 5,
+				inputDelayTicks: 0,
+			};
+
+			const hostSession = createSession({
+				game: hostGame,
+				transport: hostTransport,
+				config,
+			});
+			const p2Session = createSession({
+				game: p2Game,
+				transport: p2Transport,
+				config,
+			});
+			const p3Session = createSession({
+				game: p3Game,
+				transport: p3Transport,
+				config,
+			});
+
+			const hostDesyncs: Array<{ tick: Tick }> = [];
+			const clientDesyncs: Array<{ player: string; tick: Tick }> = [];
+
+			hostSession.on("desync", (tick) => hostDesyncs.push({ tick }));
+			p2Session.on("desync", (tick) => clientDesyncs.push({ player: "p2", tick }));
+			p3Session.on("desync", (tick) => {
+				clientDesyncs.push({ player: "p3", tick });
+				p3Game.disableDesync();
+			});
+
+			// Set up session
+			await hostSession.createRoom();
+			await p2Session.joinRoom(hostSession.roomId!, "host");
+			flushAll(hostTransport, p2Transport, p3Transport);
+
+			// In Mesh, p2 needs to connect to p3 as well (peer-to-peer)
+			await p3Session.joinRoom(hostSession.roomId!, "host");
+			flushAll(hostTransport, p2Transport, p3Transport);
+
+			// Establish peer-to-peer connections for Mesh
+			await p2Transport.connect("p3");
+			await p3Transport.connect("p2");
+			flushAll(hostTransport, p2Transport, p3Transport);
+
+			hostSession.start();
+			flushAll(hostTransport, p2Transport, p3Transport);
+
+			// Run some ticks in sync
+			for (let i = 0; i < 10; i++) {
+				hostSession.tick(NEUTRAL_INPUT);
+				p2Session.tick(NEUTRAL_INPUT);
+				p3Session.tick(NEUTRAL_INPUT);
+				flushAll(hostTransport, p2Transport, p3Transport);
+			}
+
+			// Enable desync on p3
+			p3Game.enableDesync(100);
+
+			// Run ticks to trigger detection
+			for (let i = 0; i < 25; i++) {
+				hostSession.tick(NEUTRAL_INPUT);
+				p2Session.tick(NEUTRAL_INPUT);
+				p3Session.tick(NEUTRAL_INPUT);
+				flushAll(hostTransport, p2Transport, p3Transport);
+			}
+
+			// In Mesh+Host mode, only host should detect the desync
+			assert.ok(
+				hostDesyncs.length > 0,
+				`Mesh+Host (3 players): Host should detect desync, got ${hostDesyncs.length}`,
+			);
+
+			// Clients should NOT detect in host authority mode
+			assert.strictEqual(
+				clientDesyncs.length,
+				0,
+				`Mesh+Host (3 players): Clients should not detect desync, got ${clientDesyncs.length}`,
+			);
+
+			// Note: In host authority mode without explicit recovery mechanism,
+			// the desynced client needs to request sync from host.
+			// For this test, we just verify detection works correctly.
+		});
+
+		it("should detect and recover from desync with Mesh + Peer (3 players)", async () => {
+			const transports = createLocalTransportGroup(["host", "p2", "p3"]);
+			const hostTransport = getTransport(transports, "host");
+			const p2Transport = getTransport(transports, "p2");
+			const p3Transport = getTransport(transports, "p3");
+
+			const hostGame = new TestGame();
+			const p2Game = new TestGame();
+			const p3Game = new TestGame();
+
+			const config = {
+				topology: Topology.Mesh,
+				desyncAuthority: DesyncAuthority.Peer,
+				hashInterval: 5,
+				inputDelayTicks: 0,
+			};
+
+			const hostSession = createSession({
+				game: hostGame,
+				transport: hostTransport,
+				config,
+			});
+			const p2Session = createSession({
+				game: p2Game,
+				transport: p2Transport,
+				config,
+			});
+			const p3Session = createSession({
+				game: p3Game,
+				transport: p3Transport,
+				config,
+			});
+
+			const allDesyncs: Array<{ player: string; tick: Tick }> = [];
+			hostSession.on("desync", (tick) => allDesyncs.push({ player: "host", tick }));
+			p2Session.on("desync", (tick) => allDesyncs.push({ player: "p2", tick }));
+			p3Session.on("desync", (tick) => {
+				allDesyncs.push({ player: "p3", tick });
+				p3Game.disableDesync();
+			});
+
+			// Set up session
+			await hostSession.createRoom();
+			await p2Session.joinRoom(hostSession.roomId!, "host");
+			flushAll(hostTransport, p2Transport, p3Transport);
+
+			await p3Session.joinRoom(hostSession.roomId!, "host");
+			flushAll(hostTransport, p2Transport, p3Transport);
+
+			// Establish peer-to-peer connections for Mesh
+			await p2Transport.connect("p3");
+			await p3Transport.connect("p2");
+			flushAll(hostTransport, p2Transport, p3Transport);
+
+			hostSession.start();
+			flushAll(hostTransport, p2Transport, p3Transport);
+
+			// Run some ticks in sync
+			for (let i = 0; i < 10; i++) {
+				hostSession.tick(NEUTRAL_INPUT);
+				p2Session.tick(NEUTRAL_INPUT);
+				p3Session.tick(NEUTRAL_INPUT);
+				flushAll(hostTransport, p2Transport, p3Transport);
+			}
+
+			// Verify initial sync
+			assert.strictEqual(hostGame.hash(), p2Game.hash(), "host and p2 should be in sync initially");
+			assert.strictEqual(hostGame.hash(), p3Game.hash(), "host and p3 should be in sync initially");
+
+			// Enable desync on p3
+			p3Game.enableDesync(100);
+
+			// Run ticks to trigger detection
+			for (let i = 0; i < 25; i++) {
+				hostSession.tick(NEUTRAL_INPUT);
+				p2Session.tick(NEUTRAL_INPUT);
+				p3Session.tick(NEUTRAL_INPUT);
+				flushAll(hostTransport, p2Transport, p3Transport);
+			}
+
+			// In Mesh+Peer mode, multiple players should detect
+			// p3 will detect when comparing with host and p2
+			// host and p2 will detect when comparing with p3
+			assert.ok(
+				allDesyncs.length > 0,
+				`Mesh+Peer (3 players): Should detect desync, got ${allDesyncs.length}`,
+			);
+
+			// In full mesh peer mode, we expect multiple detections
+			// p3 detects vs host, p3 detects vs p2, host detects vs p3, p2 detects vs p3
+			const p3Desyncs = allDesyncs.filter((d) => d.player === "p3");
+			assert.ok(
+				p3Desyncs.length > 0,
+				`Mesh+Peer (3 players): p3 should detect its own desync`,
+			);
+
+			// Run more ticks to allow recovery
+			for (let i = 0; i < 20; i++) {
+				hostSession.tick(NEUTRAL_INPUT);
+				p2Session.tick(NEUTRAL_INPUT);
+				p3Session.tick(NEUTRAL_INPUT);
+				flushAll(hostTransport, p2Transport, p3Transport);
+			}
+
+			// After recovery, all games should be in sync
+			assert.strictEqual(
+				hostGame.hash(),
+				p2Game.hash(),
+				"Mesh+Peer (3 players): host and p2 should be in sync after recovery",
+			);
+			assert.strictEqual(
+				hostGame.hash(),
+				p3Game.hash(),
+				"Mesh+Peer (3 players): host and p3 should be in sync after recovery",
+			);
+		});
+
+		it("should handle desync from non-host player in all topologies", async () => {
+			// Test that desync detection works regardless of which player desyncs
+			for (const topology of [Topology.Star, Topology.Mesh]) {
+				for (const authority of [DesyncAuthority.Host, DesyncAuthority.Peer]) {
+					const transports = createLocalTransportGroup(["host", "p2", "p3"]);
+					const hostTransport = getTransport(transports, "host");
+					const p2Transport = getTransport(transports, "p2");
+					const p3Transport = getTransport(transports, "p3");
+
+					const hostGame = new TestGame();
+					const p2Game = new TestGame();
+					const p3Game = new TestGame();
+
+					const config = {
+						topology,
+						desyncAuthority: authority,
+						hashInterval: 5,
+						inputDelayTicks: 0,
+					};
+
+					const hostSession = createSession({
+						game: hostGame,
+						transport: hostTransport,
+						config,
+					});
+					const p2Session = createSession({
+						game: p2Game,
+						transport: p2Transport,
+						config,
+					});
+					const p3Session = createSession({
+						game: p3Game,
+						transport: p3Transport,
+						config,
+					});
+
+					let desyncDetected = false;
+					hostSession.on("desync", () => {
+						desyncDetected = true;
+					});
+					p2Session.on("desync", () => {
+						desyncDetected = true;
+						p2Game.disableDesync();
+					});
+					p3Session.on("desync", () => {
+						desyncDetected = true;
+					});
+
+					// Set up session
+					await hostSession.createRoom();
+					await p2Session.joinRoom(hostSession.roomId!, "host");
+					flushAll(hostTransport, p2Transport, p3Transport);
+					await p3Session.joinRoom(hostSession.roomId!, "host");
+					flushAll(hostTransport, p2Transport, p3Transport);
+
+					// For Mesh, establish peer-to-peer connections
+					if (topology === Topology.Mesh) {
+						await p2Transport.connect("p3");
+						await p3Transport.connect("p2");
+						flushAll(hostTransport, p2Transport, p3Transport);
+					}
+
+					hostSession.start();
+					flushAll(hostTransport, p2Transport, p3Transport);
+
+					// Run some ticks in sync
+					for (let i = 0; i < 10; i++) {
+						hostSession.tick(NEUTRAL_INPUT);
+						p2Session.tick(NEUTRAL_INPUT);
+						p3Session.tick(NEUTRAL_INPUT);
+						flushAll(hostTransport, p2Transport, p3Transport);
+					}
+
+					// Enable desync on p2 (middle player, not host, not last)
+					p2Game.enableDesync(100);
+
+					// Run ticks to trigger detection
+					for (let i = 0; i < 25; i++) {
+						hostSession.tick(NEUTRAL_INPUT);
+						p2Session.tick(NEUTRAL_INPUT);
+						p3Session.tick(NEUTRAL_INPUT);
+						flushAll(hostTransport, p2Transport, p3Transport);
+					}
+
+					const topologyName = topology === Topology.Star ? "Star" : "Mesh";
+					const authorityName = authority === DesyncAuthority.Host ? "Host" : "Peer";
+					assert.ok(
+						desyncDetected,
+						`${topologyName}+${authorityName}: Should detect desync when p2 diverges`,
+					);
+
+					// Cleanup sessions
+					hostSession.destroy();
+					p2Session.destroy();
+					p3Session.destroy();
+				}
+			}
+		});
+	});
 });

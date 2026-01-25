@@ -425,7 +425,8 @@ function encodeHashMessage(msg: HashMessage): Uint8Array {
 	offset += writeString(view, offset, msg.playerId);
 	view.setInt32(offset, msg.tick);
 	offset += 4;
-	view.setInt32(offset, msg.hash);
+	// Hash is unsigned (game.hash() returns h >>> 0)
+	view.setUint32(offset, msg.hash);
 
 	return buffer;
 }
@@ -439,7 +440,8 @@ function decodeHashMessage(view: DataView): HashMessage {
 	const tick = asTick(view.getInt32(offset));
 	offset += 4;
 	ensureBytes(view, offset, 4, msgType);
-	const hash = view.getInt32(offset);
+	// Hash is unsigned (game.hash() returns h >>> 0)
+	const hash = view.getUint32(offset);
 
 	return {
 		type: MessageType.Hash,
@@ -472,7 +474,8 @@ function encodeSyncMessage(msg: SyncMessage): Uint8Array {
 	view.setUint8(offset++, MessageType.Sync);
 	view.setInt32(offset, msg.tick);
 	offset += 4;
-	view.setInt32(offset, msg.hash);
+	// Hash is unsigned (game.hash() returns h >>> 0)
+	view.setUint32(offset, msg.hash);
 	offset += 4;
 	offset += writeBytes(view, offset, msg.state);
 
@@ -502,7 +505,8 @@ function decodeSyncMessage(view: DataView): SyncMessage {
 	const tick = asTick(view.getInt32(offset));
 	offset += 4;
 	ensureBytes(view, offset, 4, msgType);
-	const hash = view.getInt32(offset);
+	// Hash is unsigned (game.hash() returns h >>> 0)
+	const hash = view.getUint32(offset);
 	offset += 4;
 	const [state, stateLen] = readBytes(view, offset, msgType);
 	offset += stateLen;
@@ -557,7 +561,8 @@ function encodeSyncRequestMessage(msg: SyncRequestMessage): Uint8Array {
 	offset += writeString(view, offset, msg.playerId);
 	view.setInt32(offset, msg.desyncTick);
 	offset += 4;
-	view.setInt32(offset, msg.localHash);
+	// Hash is unsigned (game.hash() returns h >>> 0)
+	view.setUint32(offset, msg.localHash);
 
 	return buffer;
 }
@@ -571,7 +576,8 @@ function decodeSyncRequestMessage(view: DataView): SyncRequestMessage {
 	const desyncTick = asTick(view.getInt32(offset));
 	offset += 4;
 	ensureBytes(view, offset, 4, msgType);
-	const localHash = view.getInt32(offset);
+	// Hash is unsigned (game.hash() returns h >>> 0)
+	const localHash = view.getUint32(offset);
 
 	return {
 		type: MessageType.SyncRequest,
@@ -824,7 +830,8 @@ function encodeStateSyncMessage(msg: StateSyncMessage): Uint8Array {
 	view.setUint8(offset++, MessageType.StateSync);
 	view.setInt32(offset, msg.tick);
 	offset += 4;
-	view.setInt32(offset, msg.hash);
+	// Hash is unsigned (game.hash() returns h >>> 0)
+	view.setUint32(offset, msg.hash);
 	offset += 4;
 	offset += writeBytes(view, offset, msg.state);
 
@@ -853,7 +860,8 @@ function decodeStateSyncMessage(view: DataView): StateSyncMessage {
 	const tick = asTick(view.getInt32(offset));
 	offset += 4;
 	ensureBytes(view, offset, 4, msgType);
-	const hash = view.getInt32(offset);
+	// Hash is unsigned (game.hash() returns h >>> 0)
+	const hash = view.getUint32(offset);
 	offset += 4;
 	const [state, stateLen] = readBytes(view, offset, msgType);
 	offset += stateLen;

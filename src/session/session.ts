@@ -151,6 +151,13 @@ export class Session {
 	/** Timer for periodic rate limit cleanup */
 	private rateLimitCleanupTimer: ReturnType<typeof setInterval> | null = null;
 
+	/** Buffer for deferred hash comparison (processed after rollback in tick()) */
+	private pendingHashMessages: Array<{
+		tick: Tick;
+		playerId: PlayerId;
+		hash: number;
+	}> = [];
+
 	/**
 	 * Create a new session.
 	 * @throws ValidationError if config values are invalid
@@ -200,6 +207,21 @@ export class Session {
 			localPlayerId: this._localPlayerId,
 			snapshotHistorySize: this.config.snapshotHistorySize,
 			maxSpeculationTicks: this.config.maxSpeculationTicks,
+			// During resimulation, emit playerJoined when crossing a player's joinTick
+			// so the game layer can re-add players that were lost during snapshot restore
+			onPlayerAddDuringResimulation: (playerId, _tick) => {
+				const playerInfo = this.playerManager.getPlayer(playerId);
+				if (playerInfo) {
+					this.emit("playerJoined", playerInfo);
+				}
+			},
+			// During resimulation, emit playerLeft when crossing a player's leaveTick
+			onPlayerRemoveDuringResimulation: (playerId, _tick) => {
+				const playerInfo = this.playerManager.getPlayer(playerId);
+				if (playerInfo) {
+					this.emit("playerLeft", playerInfo);
+				}
+			},
 		};
 		if (options.inputPredictor) {
 			engineConfig.inputPredictor = options.inputPredictor;
@@ -378,6 +400,7 @@ export class Session {
 		this.joinRateLimiter.clear();
 		this.lagMonitor.clear();
 		this.desyncManager.clear();
+		this.pendingHashMessages = [];
 
 		// Remove transport callbacks
 		this.transport.onMessage = null;
@@ -630,7 +653,17 @@ export class Session {
 				tick: result.tick,
 				rollbackTicks: result.rollbackTicks,
 			});
+
+			// Clear pending hashes for rolled-back ticks
+			// Both our state and the sender's state may have changed
+			const rollbackToTick = asTick(result.tick - result.rollbackTicks);
+			this.pendingHashMessages = this.pendingHashMessages.filter(
+				(h) => h.tick < rollbackToTick,
+			);
 		}
+
+		// Process deferred hash comparisons (after rollback has corrected state)
+		this.processPendingHashComparisons();
 
 		// Periodic hash broadcast for desync detection
 		this.maybeBroadcastHash();
@@ -1001,7 +1034,7 @@ export class Session {
 	private handleHashMessage(
 		message: Message & { type: MessageType.Hash },
 	): void {
-		// Host-authority mode: host collects and compares
+		// Host-authority mode: host collects and compares immediately
 		if (this.desyncManager.isHostAuthority) {
 			if (this._isHost) {
 				this.recordHashAndCheckDesync(
@@ -1014,35 +1047,80 @@ export class Session {
 			return;
 		}
 
-		// Peer mode: use desync manager for comparison
-		const localHash = this.engine.getHash(message.tick);
-		const desyncResult = this.desyncManager.checkPeerDesync(
-			message.tick,
-			localHash,
-			message.hash,
-			message.playerId,
+		// Peer mode: defer comparison until after rollback in tick()
+		// Store the hash for later comparison
+		this.pendingHashMessages.push({
+			tick: message.tick,
+			playerId: message.playerId,
+			hash: message.hash,
+		});
+	}
+
+	/**
+	 * Process pending hash comparisons after rollback has corrected state.
+	 * Called from tick() after engine.tick() completes.
+	 */
+	private processPendingHashComparisons(): void {
+		if (this.pendingHashMessages.length === 0) {
+			return;
+		}
+
+		const currentTick = this.engine.currentTick;
+		const confirmedTick = this.engine.confirmedTick;
+		const remaining: typeof this.pendingHashMessages = [];
+
+		// Prune threshold: discard hashes older than 2x hashInterval
+		// These are too old to be useful and prevent memory growth
+		const pruneThreshold = asTick(
+			Math.max(0, currentTick - this.config.hashInterval * 2),
 		);
 
-		if (desyncResult) {
-			this.debug.warn("Desync detected", {
-				tick: message.tick,
-				localHash: desyncResult.localHash,
-				remoteHash: desyncResult.remoteHash,
-				remotePlayer: message.playerId,
-			});
+		for (const pending of this.pendingHashMessages) {
+			// Prune old hashes that are no longer relevant
+			if (pending.tick < pruneThreshold) {
+				continue;
+			}
 
-			this.emit(
-				"desync",
-				message.tick,
-				desyncResult.localHash,
-				desyncResult.remoteHash,
+			// Only compare if the hash tick is confirmed (all inputs received)
+			// This ensures we won't roll back and change our hash for this tick
+			if (pending.tick > confirmedTick) {
+				// Not confirmed yet, keep for later
+				remaining.push(pending);
+				continue;
+			}
+
+			// Compare hashes (our state should now be correct after rollback)
+			const localHash = this.engine.getHash(pending.tick);
+			const desyncResult = this.desyncManager.checkPeerDesync(
+				pending.tick,
+				localHash,
+				pending.hash,
+				pending.playerId,
 			);
 
-			// Request sync if we're not the host
-			if (!this._isHost) {
-				this.requestSync();
+			if (desyncResult) {
+				this.debug.warn("Desync detected", {
+					tick: pending.tick,
+					localHash: desyncResult.localHash,
+					remoteHash: desyncResult.remoteHash,
+					remotePlayer: pending.playerId,
+				});
+
+				this.emit(
+					"desync",
+					pending.tick,
+					desyncResult.localHash,
+					desyncResult.remoteHash,
+				);
+
+				// Request sync if we're not the host
+				if (!this._isHost) {
+					this.requestSync();
+				}
 			}
 		}
+
+		this.pendingHashMessages = remaining;
 	}
 
 	/**
@@ -1054,6 +1132,9 @@ export class Session {
 			| (Message & { type: MessageType.StateSync }),
 	): void {
 		this.engine.setState(message.tick, message.state, message.playerTimeline);
+
+		// Clear pending hash comparisons since our state has been reset
+		this.pendingHashMessages = [];
 
 		// Update player list
 		for (const entry of message.playerTimeline) {
@@ -1194,7 +1275,12 @@ export class Session {
 	private handleJoinAccept(
 		message: Message & { type: MessageType.JoinAccept },
 	): void {
-		this.setState(SessionState.Lobby);
+		// Only transition to Lobby if we're still in Connecting state.
+		// If we're already in Playing (from receiving StateSync first due to message reordering),
+		// we should not go backwards to Lobby.
+		if (this._state === SessionState.Connecting) {
+			this.setState(SessionState.Lobby);
+		}
 
 		// Add existing players
 		for (const playerId of message.players) {
@@ -1349,32 +1435,43 @@ export class Session {
 
 	/**
 	 * Maybe broadcast hash for desync detection.
-	 * Note: engine.currentTick is the NEXT tick to process, so we broadcast
-	 * the hash for currentTick - 1 (the tick we just completed).
+	 *
+	 * IMPORTANT: We only broadcast hashes for CONFIRMED ticks, not just completed ticks.
+	 * A completed tick may have used predicted inputs that turn out to be wrong.
+	 * Broadcasting a hash based on predictions would cause false desync detections
+	 * when compared against a peer who has the actual inputs.
+	 *
+	 * We find the most recent hash-interval tick that is confirmed and broadcast that.
 	 */
 	private maybeBroadcastHash(): void {
-		const currentTick = this.engine.currentTick;
-		// The tick we just processed and have a snapshot for
-		const completedTick = asTick(currentTick - 1);
+		const confirmedTick = this.engine.confirmedTick;
 
-		if (
-			completedTick - this.lastHashBroadcastTick >=
-			this.config.hashInterval
-		) {
-			this.lastHashBroadcastTick = completedTick;
+		// Find the most recent hash-interval tick that is confirmed
+		// For example, if confirmedTick is 37 and hashInterval is 30, we want tick 30
+		const hashTick = asTick(
+			Math.floor(confirmedTick / this.config.hashInterval) *
+				this.config.hashInterval,
+		);
 
-			const hash = this.engine.getCurrentHash();
-			const hashMsg = createHash(this.localPlayerId, completedTick, hash);
+		// Only broadcast if:
+		// - hashTick is positive (we have something to hash)
+		// - We haven't already broadcast this tick
+		if (hashTick > 0 && hashTick !== this.lastHashBroadcastTick) {
+			this.lastHashBroadcastTick = hashTick;
+
+			// Get the hash from the snapshot at hashTick
+			const hash = this.engine.getHash(hashTick);
+			if (hash === undefined) {
+				// Snapshot not available (pruned) - skip this hash
+				return;
+			}
+			const hashMsg = createHash(this.localPlayerId, hashTick, hash);
 
 			// Host-authority in mesh: guests send to host only, host collects
 			if (this.desyncManager.isHostAuthority) {
 				if (this._isHost) {
 					// Host records own hash and checks for desync
-					this.recordHashAndCheckDesync(
-						completedTick,
-						this.localPlayerId,
-						hash,
-					);
+					this.recordHashAndCheckDesync(hashTick, this.localPlayerId, hash);
 				} else {
 					// Guest sends hash to host only
 					this.sendToHost(hashMsg);
