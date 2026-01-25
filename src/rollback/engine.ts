@@ -23,9 +23,6 @@ import {
 import { InputBuffer } from "./input-buffer.js";
 import { SnapshotBuffer } from "./snapshot-buffer.js";
 
-/** Number of ticks to keep before the confirmed tick when pruning */
-const PRUNE_BUFFER_TICKS = 10;
-
 /**
  * Callback for player lifecycle events during resimulation.
  */
@@ -49,6 +46,13 @@ export interface RollbackEngineConfig {
 
 	/** Input predictor for remote players */
 	inputPredictor?: InputPredictor<Uint8Array>;
+
+	/**
+	 * Number of ticks to keep before the confirmed tick when pruning.
+	 * Higher values use more memory but allow rollback further into the past.
+	 * @default 10
+	 */
+	pruneBufferTicks?: number;
 
 	/**
 	 * Callback invoked when a player should be added during resimulation.
@@ -80,6 +84,7 @@ export class RollbackEngine {
 	private readonly inputBuffer: InputBuffer;
 	private readonly inputPredictor: InputPredictor<Uint8Array>;
 	private readonly maxSpeculationTicks: number;
+	private readonly pruneBufferTicks: number;
 	private readonly onPlayerAddDuringResimulation:
 		| PlayerLifecycleCallback
 		| undefined;
@@ -99,6 +104,7 @@ export class RollbackEngine {
 		this.game = config.game;
 		this.localPlayerId = config.localPlayerId;
 		this.maxSpeculationTicks = config.maxSpeculationTicks ?? 60;
+		this.pruneBufferTicks = config.pruneBufferTicks ?? 10;
 		this.inputPredictor = config.inputPredictor ?? DEFAULT_INPUT_PREDICTOR;
 		this.onPlayerAddDuringResimulation = config.onPlayerAddDuringResimulation;
 		this.onPlayerRemoveDuringResimulation =
@@ -446,8 +452,8 @@ export class RollbackEngine {
 			this._confirmedTick = minConfirmed;
 
 			// Prune old data only when we have enough confirmed ticks to keep a buffer
-			if (this._confirmedTick > PRUNE_BUFFER_TICKS) {
-				const pruneBelow = asTick(this._confirmedTick - PRUNE_BUFFER_TICKS);
+			if (this._confirmedTick > this.pruneBufferTicks) {
+				const pruneBelow = asTick(this._confirmedTick - this.pruneBufferTicks);
 				this.inputBuffer.pruneBeforeTick(pruneBelow);
 				this.snapshotBuffer.pruneBeforeTick(pruneBelow);
 

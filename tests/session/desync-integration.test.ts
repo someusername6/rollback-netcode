@@ -10,24 +10,12 @@ import {
 	Topology,
 } from "../../src/types.js";
 import { createSession } from "../../src/session/session.js";
-import { DesyncableTestGame as TestGame, TestInputs } from "../utils/test-game.js";
+import { DesyncableTestGame as TestGame, TestInputs, getTransport } from "../utils/test-helpers.js";
 
 /**
  * Neutral input that causes no movement (128 - 128 = 0 for both axes).
  */
 const NEUTRAL_INPUT = TestInputs.NEUTRAL;
-
-/**
- * Helper to get a transport from the map with assertion.
- */
-function getTransport(
-	transports: Map<string, LocalTransport>,
-	peerId: string,
-): LocalTransport {
-	const transport = transports.get(peerId);
-	assert.ok(transport, `Transport for ${peerId} should exist`);
-	return transport;
-}
 
 /**
  * Helper to flush all transports in both directions.

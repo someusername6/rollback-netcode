@@ -10,19 +10,7 @@ import {
 	asTick,
 } from "../../src/types.js";
 import { type Session, createSession } from "../../src/session/session.js";
-import { TestGame } from "../utils/test-game.js";
-
-/**
- * Helper to get a transport from the map with assertion.
- */
-function getTransport(
-	transports: Map<string, LocalTransport>,
-	peerId: string,
-): LocalTransport {
-	const transport = transports.get(peerId);
-	assert.ok(transport, `Transport for ${peerId} should exist`);
-	return transport;
-}
+import { TestGame, getTransport } from "../utils/test-helpers.js";
 
 /**
  * Helper to get room ID with assertion.

@@ -9,19 +9,7 @@ import {
 	Topology,
 } from "../../src/types.js";
 import { type Session, createSession } from "../../src/session/session.js";
-import { TestGame, TestInputs } from "../utils/test-game.js";
-
-/**
- * Helper to get a transport from the map with assertion.
- */
-function getTransport(
-	transports: Map<string, LocalTransport>,
-	peerId: string,
-): LocalTransport {
-	const transport = transports.get(peerId);
-	assert.ok(transport, `Transport for ${peerId} should exist`);
-	return transport;
-}
+import { TestGame, TestInputs, getTransport } from "../utils/test-helpers.js";
 
 describe("Rollback Integration Tests", () => {
 	// Track sessions for cleanup

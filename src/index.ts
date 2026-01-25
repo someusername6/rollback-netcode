@@ -128,18 +128,6 @@ export {
 	validateSessionConfig,
 } from "./types.js";
 
-// Test utilities (for library consumers writing tests)
-export {
-	TestGame,
-	createTestSession,
-	createTestInput,
-	flushAllTransports,
-} from "./test-utils.js";
-export type {
-	CreateTestSessionOptions,
-	TestSessionResult,
-} from "./test-utils.js";
-
 // Debug utilities
 export { createDebugLogger, noopLogger } from "./debug.js";
 export type { DebugLogger } from "./debug.js";

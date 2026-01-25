@@ -9,93 +9,10 @@ import { describe, it } from "node:test";
 import { createSession } from "../../src/session/session.js";
 import { LocalTransport } from "../../src/transport/local.js";
 import { Topology } from "../../src/types.js";
-import type { Game, PlayerId } from "../../src/types.js";
-
-/**
- * Simple test game that tracks player positions.
- */
-class ScalingTestGame implements Game {
-	players: Map<string, { x: number; y: number }> = new Map();
-
-	addPlayer(id: string): void {
-		if (!this.players.has(id)) {
-			this.players.set(id, { x: 0, y: 0 });
-		}
-	}
-
-	removePlayer(id: string): void {
-		this.players.delete(id);
-	}
-
-	serialize(): Uint8Array {
-		const entries = Array.from(this.players.entries());
-		const data: number[] = [entries.length];
-
-		for (const [id, pos] of entries) {
-			const idBytes = new TextEncoder().encode(id);
-			data.push(idBytes.length);
-			data.push(...idBytes);
-			// Store x and y as int16
-			data.push((pos.x >> 8) & 0xff, pos.x & 0xff);
-			data.push((pos.y >> 8) & 0xff, pos.y & 0xff);
-		}
-
-		return new Uint8Array(data);
-	}
-
-	deserialize(data: Uint8Array): void {
-		this.players.clear();
-		if (data.length === 0) return;
-
-		let offset = 0;
-		const count = data[offset++]!;
-
-		for (let i = 0; i < count; i++) {
-			const idLen = data[offset++]!;
-			const id = new TextDecoder().decode(data.slice(offset, offset + idLen));
-			offset += idLen;
-			let x = (data[offset]! << 8) | data[offset + 1]!;
-			let y = (data[offset + 2]! << 8) | data[offset + 3]!;
-			if (x >= 0x8000) x -= 0x10000;
-			if (y >= 0x8000) y -= 0x10000;
-			offset += 4;
-			this.players.set(id, { x, y });
-		}
-	}
-
-	step(inputs: Map<PlayerId, Uint8Array>): void {
-		for (const [playerId, input] of inputs) {
-			const player = this.players.get(playerId);
-			if (player && input.length >= 2) {
-				player.x += input[0]! - 128;
-				player.y += input[1]! - 128;
-			}
-		}
-	}
-
-	hash(): number {
-		let h = 0;
-		for (const [id, pos] of this.players) {
-			for (let i = 0; i < id.length; i++) {
-				h = ((h << 5) - h) + id.charCodeAt(i);
-			}
-			h = ((h << 5) - h) + pos.x;
-			h = ((h << 5) - h) + pos.y;
-		}
-		return h >>> 0;
-	}
-}
-
-function flushTransports(transports: LocalTransport[], iterations = 5): void {
-	for (let i = 0; i < iterations; i++) {
-		for (const t of transports) {
-			t.flush();
-		}
-	}
-}
+import { flushTransports, MultiPlayerGame } from "../utils/test-helpers.js";
 
 interface PlayerSetup {
-	game: ScalingTestGame;
+	game: MultiPlayerGame;
 	transport: LocalTransport;
 	session: ReturnType<typeof createSession>;
 }
@@ -115,7 +32,7 @@ async function createMultiPlayerSession(
 	const effectiveMaxPlayers = maxPlayers ?? playerCount;
 
 	// Create host
-	const hostGame = new ScalingTestGame();
+	const hostGame = new MultiPlayerGame();
 	const hostTransport = new LocalTransport("host");
 	const hostSession = createSession({
 		game: hostGame,
@@ -139,7 +56,7 @@ async function createMultiPlayerSession(
 	// to ensure StateSync is delivered before next player joins
 	for (let i = 1; i < playerCount; i++) {
 		const guestId = `player${i}`;
-		const guestGame = new ScalingTestGame();
+		const guestGame = new MultiPlayerGame();
 		const guestTransport = new LocalTransport(guestId);
 		const guestSession = createSession({
 			game: guestGame,
@@ -263,7 +180,7 @@ describe("Multi-player scaling", () => {
 			}
 
 			// Add 6th player mid-game
-			const newGame = new ScalingTestGame();
+			const newGame = new MultiPlayerGame();
 			const newTransport = new LocalTransport("player5");
 			const newSession = createSession({
 				game: newGame,

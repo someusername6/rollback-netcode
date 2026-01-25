@@ -2,7 +2,7 @@ import assert from "node:assert";
 import { beforeEach, describe, it } from "node:test";
 import { type Game, type PlayerId, asPlayerId, asTick, GameError } from "../../src/types.js";
 import { RollbackEngine } from "../../src/rollback/engine.js";
-import { TestGame } from "../utils/test-game.js";
+import { TestGame } from "../utils/test-helpers.js";
 
 describe("RollbackEngine", () => {
 	let game: TestGame;

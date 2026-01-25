@@ -8,9 +8,6 @@
 import type { PlayerId, Tick } from "../types.js";
 import { asTick } from "../types.js";
 
-/** Number of ticks to keep before the confirmed tick when pruning */
-const PRUNE_BUFFER_TICKS = 10;
-
 /**
  * State for a single player's inputs.
  */

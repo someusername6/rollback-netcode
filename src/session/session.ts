@@ -758,7 +758,7 @@ export class Session {
 		if (!this.eventHandlers.has(event)) {
 			this.eventHandlers.set(event, new Set());
 		}
-		this.eventHandlers.get(event)?.add(handler);
+		this.eventHandlers.get(event)?.add(handler as EventHandler);
 	}
 
 	/**
@@ -768,7 +768,7 @@ export class Session {
 		event: E,
 		handler: SessionEvents[E],
 	): void {
-		this.eventHandlers.get(event)?.delete(handler);
+		this.eventHandlers.get(event)?.delete(handler as EventHandler);
 	}
 
 	/**
