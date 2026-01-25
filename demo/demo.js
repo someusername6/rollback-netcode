@@ -8456,6 +8456,7 @@ var DemoManager = class {
   running = false;
   topology = 1 /* Star */;
   desyncAuthority = 0 /* Host */;
+  simulatedLatency = 0;
   constructor() {
     this.setupControls();
     this.setupKeyboardInput();
@@ -8466,6 +8467,7 @@ var DemoManager = class {
   setupControls() {
     const topologySelect = document.getElementById("topology");
     const authoritySelect = document.getElementById("authority");
+    const latencySelect = document.getElementById("latency");
     const addPlayerBtn = document.getElementById("add-player");
     topologySelect.addEventListener("change", () => {
       this.topology = topologySelect.value === "mesh" ? 0 /* Mesh */ : 1 /* Star */;
@@ -8473,6 +8475,10 @@ var DemoManager = class {
     });
     authoritySelect.addEventListener("change", () => {
       this.desyncAuthority = authoritySelect.value === "peer" ? 1 /* Peer */ : 0 /* Host */;
+      this.reset();
+    });
+    latencySelect.addEventListener("change", () => {
+      this.simulatedLatency = parseInt(latencySelect.value, 10);
       this.reset();
     });
     addPlayerBtn.addEventListener("click", () => {
@@ -8522,7 +8528,11 @@ var DemoManager = class {
   addPlayer() {
     const playerId = `player-${++this.playerCounter}`;
     const isHost = this.players.size === 0;
-    const transport = new LocalTransport(playerId);
+    const transport = new LocalTransport(playerId, {
+      latency: this.simulatedLatency,
+      jitter: Math.floor(this.simulatedLatency * 0.2)
+      // 20% jitter
+    });
     if (!isHost) {
       const hostEntry = this.players.values().next().value;
       LocalTransport.link(transport, hostEntry.transport);
@@ -8735,15 +8745,37 @@ var DemoManager = class {
   }
   /**
    * Advance all sessions by one tick.
+   *
+   * When latency is 0, we interleave flushes between player ticks to ensure
+   * zero-latency message delivery. When latency is configured, we use
+   * time-based delivery to simulate realistic network conditions.
    */
   tick() {
+    if (this.simulatedLatency === 0) {
+      this.flushAllTransportsOnce();
+      const input = this.getInput();
+      for (const entry of this.players.values()) {
+        const playerInput = entry.id === this.activePlayerId ? input : new Uint8Array([0]);
+        entry.session.tick(playerInput);
+        this.flushAllTransportsOnce();
+      }
+    } else {
+      for (const entry of this.players.values()) {
+        entry.transport.tick(TICK_MS);
+      }
+      const input = this.getInput();
+      for (const entry of this.players.values()) {
+        const playerInput = entry.id === this.activePlayerId ? input : new Uint8Array([0]);
+        entry.session.tick(playerInput);
+      }
+    }
+  }
+  /**
+   * Flush all transports once (single pass).
+   */
+  flushAllTransportsOnce() {
     for (const entry of this.players.values()) {
       entry.transport.flush();
-    }
-    const input = this.getInput();
-    for (const entry of this.players.values()) {
-      const playerInput = entry.id === this.activePlayerId ? input : new Uint8Array([0]);
-      entry.session.tick(playerInput);
     }
   }
   /**

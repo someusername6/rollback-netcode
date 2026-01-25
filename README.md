@@ -206,7 +206,6 @@ const session = createSession({
   config: {
     maxPlayers: 4,              // Maximum players allowed
     tickRate: 60,               // Ticks per second
-    inputDelayTicks: 2,         // Local input delay (reduces rollbacks)
     snapshotHistorySize: 120,   // Ticks of history to keep
     hashInterval: 60,           // Ticks between hash checks
     disconnectTimeout: 5000,    // Ms before disconnecting idle peer

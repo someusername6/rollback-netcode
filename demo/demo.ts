@@ -37,6 +37,7 @@ class DemoManager {
 
   private topology: Topology = Topology.Star;
   private desyncAuthority: DesyncAuthority = DesyncAuthority.Host;
+  private simulatedLatency: number = 0;
 
   constructor() {
     this.setupControls();
@@ -49,6 +50,7 @@ class DemoManager {
   private setupControls(): void {
     const topologySelect = document.getElementById("topology") as HTMLSelectElement;
     const authoritySelect = document.getElementById("authority") as HTMLSelectElement;
+    const latencySelect = document.getElementById("latency") as HTMLSelectElement;
     const addPlayerBtn = document.getElementById("add-player") as HTMLButtonElement;
 
     topologySelect.addEventListener("change", () => {
@@ -60,6 +62,11 @@ class DemoManager {
       this.desyncAuthority = authoritySelect.value === "peer"
         ? DesyncAuthority.Peer
         : DesyncAuthority.Host;
+      this.reset();
+    });
+
+    latencySelect.addEventListener("change", () => {
+      this.simulatedLatency = parseInt(latencySelect.value, 10);
       this.reset();
     });
 
@@ -117,8 +124,11 @@ class DemoManager {
     const playerId = `player-${++this.playerCounter}`;
     const isHost = this.players.size === 0;
 
-    // Create transport
-    const transport = new LocalTransport(playerId);
+    // Create transport with simulated latency
+    const transport = new LocalTransport(playerId, {
+      latency: this.simulatedLatency,
+      jitter: Math.floor(this.simulatedLatency * 0.2), // 20% jitter
+    });
 
     // Link transport based on topology
     if (!isHost) {
@@ -409,19 +419,44 @@ class DemoManager {
 
   /**
    * Advance all sessions by one tick.
+   *
+   * When latency is 0, we interleave flushes between player ticks to ensure
+   * zero-latency message delivery. When latency is configured, we use
+   * time-based delivery to simulate realistic network conditions.
    */
   private tick(): void {
-    // Flush transports first
+    if (this.simulatedLatency === 0) {
+      // Zero-latency mode: interleave flushes for instant delivery
+      this.flushAllTransportsOnce();
+
+      const input = this.getInput();
+      for (const entry of this.players.values()) {
+        const playerInput = entry.id === this.activePlayerId ? input : new Uint8Array([0]);
+        entry.session.tick(playerInput);
+        this.flushAllTransportsOnce();
+      }
+    } else {
+      // Simulated latency mode: use time-based delivery
+      // Advance transport time and deliver due messages
+      for (const entry of this.players.values()) {
+        entry.transport.tick(TICK_MS);
+      }
+
+      // Tick all sessions
+      const input = this.getInput();
+      for (const entry of this.players.values()) {
+        const playerInput = entry.id === this.activePlayerId ? input : new Uint8Array([0]);
+        entry.session.tick(playerInput);
+      }
+    }
+  }
+
+  /**
+   * Flush all transports once (single pass).
+   */
+  private flushAllTransportsOnce(): void {
     for (const entry of this.players.values()) {
       entry.transport.flush();
-    }
-
-    // Tick all sessions
-    const input = this.getInput();
-    for (const entry of this.players.values()) {
-      // Only the active player gets real input
-      const playerInput = entry.id === this.activePlayerId ? input : new Uint8Array([0]);
-      entry.session.tick(playerInput);
     }
   }
 
