@@ -443,6 +443,137 @@ describe("WebRTCTransport", () => {
 
 			transport.destroy();
 		});
+
+		it("should call onError when ICE candidate fails", async () => {
+			// Make addIceCandidate throw
+			const mockAddIceCandidate = mock.fn(async () => {
+				throw new Error("ICE candidate rejected");
+			});
+			(MockRTCPeerConnection.prototype as unknown as { addIceCandidate: typeof mockAddIceCandidate }).addIceCandidate = mockAddIceCandidate;
+
+			const transport = new WebRTCTransport("local", { keepaliveInterval: 0 });
+			transport.setSignalingCallbacks({
+				onLocalDescription: () => {},
+				onLocalCandidate: () => {},
+			});
+
+			const errors: Array<{ peerId: string | null; error: Error; context: string }> = [];
+			transport.onError = (peerId, error, context) => {
+				errors.push({ peerId, error, context });
+			};
+
+			// Start connection to create peer
+			const connectPromise = transport.connect("peer1").catch(() => {});
+			await new Promise(resolve => setTimeout(resolve, 10));
+
+			// Try to add ICE candidate which will fail
+			await transport.handleRemoteCandidate("peer1", {
+				candidate: "invalid",
+				sdpMid: "0",
+				sdpMLineIndex: 0,
+			});
+
+			// onError should have been called
+			assert.strictEqual(errors.length, 1, "onError should be called once");
+			assert.strictEqual(errors[0]?.peerId, "peer1");
+			assert.strictEqual(errors[0]?.context, "addIceCandidate");
+			assert.ok(errors[0]?.error.message.includes("ICE candidate rejected"));
+
+			transport.destroy();
+			await connectPromise;
+
+			// Restore original
+			(MockRTCPeerConnection.prototype as unknown as { addIceCandidate: typeof mockAddIceCandidate }).addIceCandidate =
+				async () => {};
+		});
+
+		it("should call onError when send fails", async () => {
+			const transport = new WebRTCTransport("local", { keepaliveInterval: 0 });
+			transport.setSignalingCallbacks({
+				onLocalDescription: () => {},
+				onLocalCandidate: () => {},
+			});
+
+			const errors: Array<{ peerId: string | null; error: Error; context: string }> = [];
+			transport.onError = (peerId, error, context) => {
+				errors.push({ peerId, error, context });
+			};
+
+			// Start connection
+			const connectPromise = transport.connect("peer1").catch(() => {});
+			await new Promise(resolve => setTimeout(resolve, 10));
+
+			// Get mock channels and make them "open"
+			const peers = (transport as unknown as { peers: Map<string, {
+				connection: MockRTCPeerConnection;
+				isConnected: boolean;
+				reliableChannel: MockRTCDataChannel | null;
+			}> }).peers;
+			const peer = peers.get("peer1");
+			assert.ok(peer, "Peer should exist");
+
+			// Simulate connected state with open channel
+			peer.isConnected = true;
+			if (peer.reliableChannel) {
+				peer.reliableChannel.readyState = "open";
+				// Make send throw
+				peer.reliableChannel.send = () => {
+					throw new Error("Channel buffer full");
+				};
+			}
+
+			// Try to send
+			transport.send("peer1", new Uint8Array([1, 2, 3]), true);
+
+			// onError should have been called
+			assert.strictEqual(errors.length, 1, "onError should be called once");
+			assert.strictEqual(errors[0]?.peerId, "peer1");
+			assert.strictEqual(errors[0]?.context, "send");
+			assert.ok(errors[0]?.error.message.includes("Channel buffer full"));
+
+			transport.destroy();
+			await connectPromise;
+		});
+
+		it("should call onError when data channel error event fires", async () => {
+			const transport = new WebRTCTransport("local", { keepaliveInterval: 0 });
+			transport.setSignalingCallbacks({
+				onLocalDescription: () => {},
+				onLocalCandidate: () => {},
+			});
+
+			const errors: Array<{ peerId: string | null; error: Error; context: string }> = [];
+			transport.onError = (peerId, error, context) => {
+				errors.push({ peerId, error, context });
+			};
+
+			// Start connection
+			const connectPromise = transport.connect("peer1").catch(() => {});
+			await new Promise(resolve => setTimeout(resolve, 10));
+
+			// Get mock channel
+			const peers = (transport as unknown as { peers: Map<string, {
+				reliableChannel: MockRTCDataChannel | null;
+			}> }).peers;
+			const peer = peers.get("peer1");
+			assert.ok(peer, "Peer should exist");
+			assert.ok(peer.reliableChannel, "Reliable channel should exist");
+
+			// Simulate error event
+			if (peer.reliableChannel.onerror) {
+				// RTCErrorEvent has an error property
+				const errorEvent = { error: new Error("DataChannel failure") } as unknown as Event;
+				peer.reliableChannel.onerror(errorEvent);
+			}
+
+			// onError should have been called
+			assert.strictEqual(errors.length, 1, "onError should be called once");
+			assert.strictEqual(errors[0]?.peerId, "peer1");
+			assert.strictEqual(errors[0]?.context, "dataChannel.reliable");
+
+			transport.destroy();
+			await connectPromise;
+		});
 	});
 });
 

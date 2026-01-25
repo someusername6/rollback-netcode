@@ -109,6 +109,7 @@ export class TransformingTransport implements TransportAdapter {
 		null;
 	public onConnect: ((peerId: string) => void) | null = null;
 	public onDisconnect: ((peerId: string) => void) | null = null;
+	public onError: ((peerId: string | null, error: Error, context: string) => void) | null = null;
 
 	private readonly inner: TransportAdapter;
 	private readonly config: TransformingTransportConfig;
@@ -152,6 +153,13 @@ export class TransformingTransport implements TransportAdapter {
 			this.cleanupPeerState(peerId);
 			this.onDisconnect?.(peerId);
 		};
+
+		// Forward errors from inner transport
+		if (this.inner.onError !== undefined) {
+			this.inner.onError = (peerId, error, context) => {
+				this.onError?.(peerId, error, context);
+			};
+		}
 
 		// Start periodic cleanup for timed-out reassembly buffers
 		this.startCleanupTimer();

@@ -79,6 +79,17 @@ export interface TransportAdapter {
 	onDisconnect: ((peerId: string) => void) | null;
 
 	/**
+	 * Callback invoked when a transport error occurs.
+	 * This allows the application layer to be notified of network issues
+	 * that might not cause immediate disconnection.
+	 *
+	 * @param peerId - The peer involved (if applicable, null for general errors)
+	 * @param error - The error that occurred
+	 * @param context - Additional context about where the error occurred
+	 */
+	onError?: ((peerId: string | null, error: Error, context: string) => void) | null;
+
+	/**
 	 * Set of currently connected peer IDs.
 	 */
 	readonly connectedPeers: ReadonlySet<string>;

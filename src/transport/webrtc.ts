@@ -201,6 +201,7 @@ export class WebRTCTransport implements TransportAdapter {
 	onMessage: ((peerId: string, message: Uint8Array) => void) | null = null;
 	onConnect: ((peerId: string) => void) | null = null;
 	onDisconnect: ((peerId: string) => void) | null = null;
+	onError: ((peerId: string | null, error: Error, context: string) => void) | null = null;
 
 	/**
 	 * Create a new WebRTC transport.
@@ -384,7 +385,9 @@ export class WebRTCTransport implements TransportAdapter {
 		try {
 			await peer.connection.addIceCandidate(candidate);
 		} catch (error) {
+			const err = error instanceof Error ? error : new Error(String(error));
 			console.warn(`Failed to add ICE candidate for peer ${peerId}:`, error);
+			this.onError?.(peerId, err, "addIceCandidate");
 		}
 	}
 
@@ -444,7 +447,9 @@ export class WebRTCTransport implements TransportAdapter {
 			// strict types complain about SharedArrayBuffer. Cast to satisfy types.
 			channel.send(message as unknown as ArrayBufferView<ArrayBuffer>);
 		} catch (error) {
+			const err = error instanceof Error ? error : new Error(String(error));
 			console.warn(`Failed to send message to peer ${peerId}:`, error);
+			this.onError?.(peerId, err, "send");
 		}
 	}
 
@@ -583,10 +588,15 @@ export class WebRTCTransport implements TransportAdapter {
 		};
 
 		channel.onerror = (event) => {
+			const channelType = isReliable ? "reliable" : "unreliable";
 			console.warn(
-				`DataChannel error for peer ${peerId} (${isReliable ? "reliable" : "unreliable"}):`,
+				`DataChannel error for peer ${peerId} (${channelType}):`,
 				event,
 			);
+			// RTCErrorEvent has an error property, but the type might be just Event
+			const rtcEvent = event as RTCErrorEvent;
+			const error = rtcEvent.error ?? new Error(`DataChannel error (${channelType})`);
+			this.onError?.(peerId, error, `dataChannel.${channelType}`);
 		};
 
 		channel.onmessage = (event) => {
@@ -729,7 +739,9 @@ export class WebRTCTransport implements TransportAdapter {
 		try {
 			await this.createOffer(peerId);
 		} catch (error) {
+			const err = error instanceof Error ? error : new Error(String(error));
 			console.warn(`Reconnection attempt failed for peer ${peerId}:`, error);
+			this.onError?.(peerId, err, "reconnect");
 		}
 	}
 

@@ -77,6 +77,121 @@ describe("Message Encoding/Decoding", () => {
 				},
 			);
 		});
+
+		it("should throw EncodeError when single input exceeds MAX_INPUT_SIZE_PER_FRAME", () => {
+			// MAX_INPUT_SIZE_PER_FRAME is 1024 bytes
+			const largeInput = new Uint8Array(1025);
+			const msg = {
+				type: MessageType.Input as const,
+				playerId: asPlayerId("player-1"),
+				inputs: [{ tick: asTick(0), input: largeInput }],
+			};
+
+			assert.throws(
+				() => encodeMessage(msg),
+				(error: unknown) => {
+					assert.ok(error instanceof EncodeError);
+					assert.ok(error.field.includes("input.length"));
+					assert.strictEqual(error.maxValue, 1024);
+					assert.strictEqual(error.actualValue, 1025);
+					return true;
+				},
+			);
+		});
+
+		it("should throw EncodeError when total message size exceeds MAX_INPUT_MESSAGE_SIZE", () => {
+			// MAX_INPUT_MESSAGE_SIZE is 65536 bytes
+			// Create many small inputs that exceed total size
+			const inputs = Array.from({ length: 255 }, (_, i) => ({
+				tick: asTick(i),
+				input: new Uint8Array(300), // 255 * 300 + overhead > 65536
+			}));
+
+			const msg = {
+				type: MessageType.Input as const,
+				playerId: asPlayerId("player-1"),
+				inputs,
+			};
+
+			assert.throws(
+				() => encodeMessage(msg),
+				(error: unknown) => {
+					assert.ok(error instanceof EncodeError);
+					assert.strictEqual(error.field, "totalSize");
+					assert.strictEqual(error.maxValue, 65536);
+					return true;
+				},
+			);
+		});
+
+		it("should throw DecodeError when decoding message with oversized input frame", () => {
+			// Manually craft a malicious message with a large inputLen field
+			// Format: type(1) + playerIdLen(2) + playerId + inputCount(1) + [tick(4) + inputLen(2) + input]*
+			const playerId = "p1";
+			const playerIdBytes = new TextEncoder().encode(playerId);
+
+			// Create a buffer that claims to have a 2000-byte input (exceeds 1024 limit)
+			const maliciousSize = 2000;
+			const buffer = new Uint8Array(
+				1 + 2 + playerIdBytes.length + 1 + 4 + 2 + maliciousSize
+			);
+			const view = new DataView(buffer.buffer);
+
+			let offset = 0;
+			view.setUint8(offset++, MessageType.Input);
+			view.setUint16(offset, playerIdBytes.length);
+			offset += 2;
+			buffer.set(playerIdBytes, offset);
+			offset += playerIdBytes.length;
+			view.setUint8(offset++, 1); // 1 input
+			view.setInt32(offset, 0); // tick 0
+			offset += 4;
+			view.setUint16(offset, maliciousSize); // Oversized input length
+			offset += 2;
+			// Fill with zeros (actual data)
+
+			assert.throws(
+				() => decodeMessage(buffer),
+				(error: unknown) => {
+					assert.ok(error instanceof DecodeError);
+					assert.ok(error.message.includes("exceeds maximum size"));
+					return true;
+				},
+			);
+		});
+
+		it("should throw DecodeError when decoding oversized message", () => {
+			// Create a message larger than MAX_INPUT_MESSAGE_SIZE
+			const oversizedBuffer = new Uint8Array(70000);
+			oversizedBuffer[0] = MessageType.Input;
+
+			assert.throws(
+				() => decodeMessage(oversizedBuffer),
+				(error: unknown) => {
+					assert.ok(error instanceof DecodeError);
+					assert.ok(error.message.includes("exceeds maximum size"));
+					return true;
+				},
+			);
+		});
+
+		it("should accept input at exactly MAX_INPUT_SIZE_PER_FRAME", () => {
+			const maxInput = new Uint8Array(1024);
+			const msg = {
+				type: MessageType.Input as const,
+				playerId: asPlayerId("p1"),
+				inputs: [{ tick: asTick(0), input: maxInput }],
+			};
+
+			// Should not throw
+			const encoded = encodeMessage(msg);
+			const decoded = decodeMessage(encoded);
+
+			assert.strictEqual(decoded.type, MessageType.Input);
+			if (decoded.type === MessageType.Input) {
+				assert.strictEqual(decoded.inputs[0]?.input.length, 1024);
+			}
+		});
 	});
 
 	describe("InputAckMessage", () => {

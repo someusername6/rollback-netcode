@@ -214,6 +214,7 @@ export class LocalTransport implements TransportAdapter {
 		null;
 	public onConnect: ((peerId: string) => void) | null = null;
 	public onDisconnect: ((peerId: string) => void) | null = null;
+	public onError: ((peerId: string | null, error: Error, context: string) => void) | null = null;
 
 	private readonly _connectedPeers: Set<string> = new Set();
 	private readonly linkedTransports: Map<string, LocalTransport> = new Map();

@@ -107,6 +107,24 @@ const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
 // =============================================================================
+// Protocol Limits
+// =============================================================================
+
+/**
+ * Maximum size of a single input frame in bytes.
+ * This prevents malicious peers from sending excessively large inputs.
+ * 1KB is more than sufficient for any reasonable game input.
+ */
+export const MAX_INPUT_SIZE_PER_FRAME = 1024;
+
+/**
+ * Maximum total size of an InputMessage in bytes.
+ * This prevents memory exhaustion from malicious messages.
+ * 64KB allows for 255 frames × ~250 bytes each with overhead.
+ */
+export const MAX_INPUT_MESSAGE_SIZE = 65536;
+
+// =============================================================================
 // Enum Encoding Helpers
 // =============================================================================
 
@@ -315,6 +333,19 @@ function encodeInputMessage(msg: InputMessage): Uint8Array {
 		);
 	}
 
+	// Validate individual input sizes
+	for (let i = 0; i < msg.inputs.length; i++) {
+		const entry = msg.inputs[i];
+		if (entry && entry.input.length > MAX_INPUT_SIZE_PER_FRAME) {
+			throw new EncodeError(
+				"Individual input size exceeds maximum",
+				`inputs[${i}].input.length`,
+				MAX_INPUT_SIZE_PER_FRAME,
+				entry.input.length,
+			);
+		}
+	}
+
 	const playerIdBytes = textEncoder.encode(msg.playerId);
 	let totalSize =
 		1 + // type
@@ -324,6 +355,16 @@ function encodeInputMessage(msg: InputMessage): Uint8Array {
 
 	for (const entry of msg.inputs) {
 		totalSize += 4 + 2 + entry.input.length; // tick + inputLen + input
+	}
+
+	// Validate total message size
+	if (totalSize > MAX_INPUT_MESSAGE_SIZE) {
+		throw new EncodeError(
+			"Total input message size exceeds maximum",
+			"totalSize",
+			MAX_INPUT_MESSAGE_SIZE,
+			totalSize,
+		);
 	}
 
 	const buffer = new Uint8Array(totalSize);
@@ -348,6 +389,18 @@ function encodeInputMessage(msg: InputMessage): Uint8Array {
 
 function decodeInputMessage(view: DataView): InputMessage {
 	const msgType = MessageType.Input;
+
+	// Validate total message size first to prevent memory exhaustion
+	if (view.byteLength > MAX_INPUT_MESSAGE_SIZE) {
+		throw new DecodeError(
+			`Input message exceeds maximum size of ${MAX_INPUT_MESSAGE_SIZE} bytes`,
+			msgType,
+			0,
+			MAX_INPUT_MESSAGE_SIZE,
+			view.byteLength,
+		);
+	}
+
 	let offset = 1;
 	const [playerId, playerIdLen] = readString(view, offset, msgType);
 	offset += playerIdLen;
@@ -363,6 +416,18 @@ function decodeInputMessage(view: DataView): InputMessage {
 		ensureBytes(view, offset, 2, msgType);
 		const inputLen = view.getUint16(offset);
 		offset += 2;
+
+		// Validate individual input size before allocating
+		if (inputLen > MAX_INPUT_SIZE_PER_FRAME) {
+			throw new DecodeError(
+				`Input frame ${i} exceeds maximum size of ${MAX_INPUT_SIZE_PER_FRAME} bytes`,
+				msgType,
+				offset - 2,
+				MAX_INPUT_SIZE_PER_FRAME,
+				inputLen,
+			);
+		}
+
 		ensureBytes(view, offset, inputLen, msgType);
 		const input = new Uint8Array(inputLen);
 		input.set(new Uint8Array(view.buffer, view.byteOffset + offset, inputLen));
