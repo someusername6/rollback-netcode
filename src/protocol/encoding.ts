@@ -124,6 +124,43 @@ export const MAX_INPUT_SIZE_PER_FRAME = 1024;
  */
 export const MAX_INPUT_MESSAGE_SIZE = 65536;
 
+/**
+ * Configurable limits for protocol decoding.
+ * These limits prevent DoS attacks via oversized messages.
+ */
+export interface ProtocolLimits {
+	/**
+	 * Maximum length of a string (player ID, room ID, etc.) in bytes.
+	 * Prevents memory exhaustion from malicious large strings.
+	 * @default 1024
+	 */
+	maxStringLength: number;
+
+	/**
+	 * Maximum number of players in a player timeline.
+	 * Prevents memory exhaustion from malicious large player lists.
+	 * @default 256
+	 */
+	maxPlayerCount: number;
+
+	/**
+	 * Maximum size of game state in bytes.
+	 * Prevents memory exhaustion from malicious large state payloads.
+	 * @default 1000000 (1MB)
+	 */
+	maxStateSize: number;
+}
+
+/**
+ * Default protocol limits.
+ * These values are suitable for most games and provide DoS protection.
+ */
+export const DEFAULT_PROTOCOL_LIMITS: ProtocolLimits = {
+	maxStringLength: 1024,
+	maxPlayerCount: 256,
+	maxStateSize: 1_000_000, // 1MB
+};
+
 // =============================================================================
 // Enum Encoding Helpers
 // =============================================================================
@@ -173,9 +210,22 @@ function readString(
 	view: DataView,
 	offset: number,
 	messageType?: number,
+	maxLength?: number,
 ): [string, number] {
 	ensureBytes(view, offset, 2, messageType);
 	const length = view.getUint16(offset);
+
+	// Validate string length against limit if provided
+	if (maxLength !== undefined && length > maxLength) {
+		throw new DecodeError(
+			`String length exceeds maximum of ${maxLength} bytes`,
+			messageType,
+			offset,
+			maxLength,
+			length,
+		);
+	}
+
 	ensureBytes(view, offset + 2, length, messageType);
 	const bytes = new Uint8Array(
 		view.buffer,
@@ -196,9 +246,22 @@ function readBytes(
 	view: DataView,
 	offset: number,
 	messageType?: number,
+	maxSize?: number,
 ): [Uint8Array, number] {
 	ensureBytes(view, offset, 4, messageType);
 	const length = view.getUint32(offset);
+
+	// Validate byte array size against limit if provided
+	if (maxSize !== undefined && length > maxSize) {
+		throw new DecodeError(
+			`Byte array size exceeds maximum of ${maxSize} bytes`,
+			messageType,
+			offset,
+			maxSize,
+			length,
+		);
+	}
+
 	ensureBytes(view, offset + 4, length, messageType);
 	const data = new Uint8Array(length);
 	data.set(new Uint8Array(view.buffer, view.byteOffset + offset + 4, length));
@@ -257,9 +320,14 @@ export function encodeMessage(message: Message): Uint8Array {
 
 /**
  * Decode a binary message.
- * @throws DecodeError if the message is malformed or truncated
+ * @param data - The binary data to decode
+ * @param limits - Optional protocol limits for DoS protection (defaults to DEFAULT_PROTOCOL_LIMITS)
+ * @throws DecodeError if the message is malformed, truncated, or exceeds limits
  */
-export function decodeMessage(data: Uint8Array): Message {
+export function decodeMessage(
+	data: Uint8Array,
+	limits: ProtocolLimits = DEFAULT_PROTOCOL_LIMITS,
+): Message {
 	if (data.length === 0) {
 		throw new DecodeError("Empty message", undefined, 0, 1, 0);
 	}
@@ -269,43 +337,43 @@ export function decodeMessage(data: Uint8Array): Message {
 
 	switch (type) {
 		case MessageType.Input:
-			return decodeInputMessage(view);
+			return decodeInputMessage(view, limits);
 		case MessageType.InputAck:
-			return decodeInputAckMessage(view);
+			return decodeInputAckMessage(view, limits);
 		case MessageType.Hash:
-			return decodeHashMessage(view);
+			return decodeHashMessage(view, limits);
 		case MessageType.Sync:
-			return decodeSyncMessage(view);
+			return decodeSyncMessage(view, limits);
 		case MessageType.SyncRequest:
-			return decodeSyncRequestMessage(view);
+			return decodeSyncRequestMessage(view, limits);
 		case MessageType.Pause:
-			return decodePauseMessage(view);
+			return decodePauseMessage(view, limits);
 		case MessageType.Resume:
-			return decodeResumeMessage(view);
+			return decodeResumeMessage(view, limits);
 		case MessageType.JoinRequest:
-			return decodeJoinRequestMessage(view);
+			return decodeJoinRequestMessage(view, limits);
 		case MessageType.JoinAccept:
-			return decodeJoinAcceptMessage(view);
+			return decodeJoinAcceptMessage(view, limits);
 		case MessageType.JoinReject:
-			return decodeJoinRejectMessage(view);
+			return decodeJoinRejectMessage(view, limits);
 		case MessageType.StateSync:
-			return decodeStateSyncMessage(view);
+			return decodeStateSyncMessage(view, limits);
 		case MessageType.PlayerJoined:
-			return decodePlayerJoinedMessage(view);
+			return decodePlayerJoinedMessage(view, limits);
 		case MessageType.PlayerLeft:
-			return decodePlayerLeftMessage(view);
+			return decodePlayerLeftMessage(view, limits);
 		case MessageType.Ping:
 			return decodePingMessage(view);
 		case MessageType.Pong:
 			return decodePongMessage(view);
 		case MessageType.LagReport:
-			return decodeLagReportMessage(view);
+			return decodeLagReportMessage(view, limits);
 		case MessageType.DisconnectReport:
-			return decodeDisconnectReportMessage(view);
+			return decodeDisconnectReportMessage(view, limits);
 		case MessageType.ResumeCountdown:
 			return decodeResumeCountdownMessage(view);
 		case MessageType.DropPlayer:
-			return decodeDropPlayerMessage(view);
+			return decodeDropPlayerMessage(view, limits);
 		default:
 			throw new DecodeError(
 				`Unknown message type: ${type}`,
@@ -387,7 +455,10 @@ function encodeInputMessage(msg: InputMessage): Uint8Array {
 	return buffer;
 }
 
-function decodeInputMessage(view: DataView): InputMessage {
+function decodeInputMessage(
+	view: DataView,
+	limits: ProtocolLimits,
+): InputMessage {
 	const msgType = MessageType.Input;
 
 	// Validate total message size first to prevent memory exhaustion
@@ -402,7 +473,12 @@ function decodeInputMessage(view: DataView): InputMessage {
 	}
 
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset, msgType);
+	const [playerId, playerIdLen] = readString(
+		view,
+		offset,
+		msgType,
+		limits.maxStringLength,
+	);
 	offset += playerIdLen;
 
 	ensureBytes(view, offset, 1, msgType);
@@ -460,10 +536,18 @@ function encodeInputAckMessage(msg: InputAckMessage): Uint8Array {
 	return buffer;
 }
 
-function decodeInputAckMessage(view: DataView): InputAckMessage {
+function decodeInputAckMessage(
+	view: DataView,
+	limits: ProtocolLimits,
+): InputAckMessage {
 	const msgType = MessageType.InputAck;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset, msgType);
+	const [playerId, playerIdLen] = readString(
+		view,
+		offset,
+		msgType,
+		limits.maxStringLength,
+	);
 	offset += playerIdLen;
 	ensureBytes(view, offset, 4, msgType);
 	const ackedTick = asTick(view.getInt32(offset));
@@ -496,10 +580,18 @@ function encodeHashMessage(msg: HashMessage): Uint8Array {
 	return buffer;
 }
 
-function decodeHashMessage(view: DataView): HashMessage {
+function decodeHashMessage(
+	view: DataView,
+	limits: ProtocolLimits,
+): HashMessage {
 	const msgType = MessageType.Hash;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset, msgType);
+	const [playerId, playerIdLen] = readString(
+		view,
+		offset,
+		msgType,
+		limits.maxStringLength,
+	);
 	offset += playerIdLen;
 	ensureBytes(view, offset, 4, msgType);
 	const tick = asTick(view.getInt32(offset));
@@ -563,7 +655,10 @@ function encodeSyncMessage(msg: SyncMessage): Uint8Array {
 	return buffer;
 }
 
-function decodeSyncMessage(view: DataView): SyncMessage {
+function decodeSyncMessage(
+	view: DataView,
+	limits: ProtocolLimits,
+): SyncMessage {
 	const msgType = MessageType.Sync;
 	let offset = 1;
 	ensureBytes(view, offset, 4, msgType);
@@ -573,16 +668,33 @@ function decodeSyncMessage(view: DataView): SyncMessage {
 	// Hash is unsigned (game.hash() returns h >>> 0)
 	const hash = view.getUint32(offset);
 	offset += 4;
-	const [state, stateLen] = readBytes(view, offset, msgType);
+	const [state, stateLen] = readBytes(view, offset, msgType, limits.maxStateSize);
 	offset += stateLen;
 
 	ensureBytes(view, offset, 2, msgType);
 	const playerCount = view.getUint16(offset);
 	offset += 2;
+
+	// Validate player count against limit
+	if (playerCount > limits.maxPlayerCount) {
+		throw new DecodeError(
+			`Player count exceeds maximum of ${limits.maxPlayerCount}`,
+			msgType,
+			offset - 2,
+			limits.maxPlayerCount,
+			playerCount,
+		);
+	}
+
 	const playerTimeline: SyncMessage["playerTimeline"] = [];
 
 	for (let i = 0; i < playerCount; i++) {
-		const [playerId, idLen] = readString(view, offset, msgType);
+		const [playerId, idLen] = readString(
+			view,
+			offset,
+			msgType,
+			limits.maxStringLength,
+		);
 		offset += idLen;
 		ensureBytes(view, offset, 4, msgType);
 		const joinTick = asTick(view.getInt32(offset));
@@ -632,10 +744,18 @@ function encodeSyncRequestMessage(msg: SyncRequestMessage): Uint8Array {
 	return buffer;
 }
 
-function decodeSyncRequestMessage(view: DataView): SyncRequestMessage {
+function decodeSyncRequestMessage(
+	view: DataView,
+	limits: ProtocolLimits,
+): SyncRequestMessage {
 	const msgType = MessageType.SyncRequest;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset, msgType);
+	const [playerId, playerIdLen] = readString(
+		view,
+		offset,
+		msgType,
+		limits.maxStringLength,
+	);
 	offset += playerIdLen;
 	ensureBytes(view, offset, 4, msgType);
 	const desyncTick = asTick(view.getInt32(offset));
@@ -672,10 +792,18 @@ function encodePauseMessage(msg: PauseMessage): Uint8Array {
 	return buffer;
 }
 
-function decodePauseMessage(view: DataView): PauseMessage {
+function decodePauseMessage(
+	view: DataView,
+	limits: ProtocolLimits,
+): PauseMessage {
 	const msgType = MessageType.Pause;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset, msgType);
+	const [playerId, playerIdLen] = readString(
+		view,
+		offset,
+		msgType,
+		limits.maxStringLength,
+	);
 	offset += playerIdLen;
 	ensureBytes(view, offset, 5, msgType); // 4 for tick + 1 for reason
 	const pauseTick = asTick(view.getInt32(offset));
@@ -708,10 +836,18 @@ function encodeResumeMessage(msg: ResumeMessage): Uint8Array {
 	return buffer;
 }
 
-function decodeResumeMessage(view: DataView): ResumeMessage {
+function decodeResumeMessage(
+	view: DataView,
+	limits: ProtocolLimits,
+): ResumeMessage {
 	const msgType = MessageType.Resume;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset, msgType);
+	const [playerId, playerIdLen] = readString(
+		view,
+		offset,
+		msgType,
+		limits.maxStringLength,
+	);
 	offset += playerIdLen;
 	ensureBytes(view, offset, 4, msgType);
 	const resumeTick = asTick(view.getInt32(offset));
@@ -746,10 +882,18 @@ function encodeJoinRequestMessage(msg: JoinRequestMessage): Uint8Array {
 	return buffer;
 }
 
-function decodeJoinRequestMessage(view: DataView): JoinRequestMessage {
+function decodeJoinRequestMessage(
+	view: DataView,
+	limits: ProtocolLimits,
+): JoinRequestMessage {
 	const msgType = MessageType.JoinRequest;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset, msgType);
+	const [playerId, playerIdLen] = readString(
+		view,
+		offset,
+		msgType,
+		limits.maxStringLength,
+	);
 	offset += playerIdLen;
 
 	// Read role if present (backwards compatible: if not enough bytes, default to undefined)
@@ -807,12 +951,25 @@ function encodeJoinAcceptMessage(msg: JoinAcceptMessage): Uint8Array {
 	return buffer;
 }
 
-function decodeJoinAcceptMessage(view: DataView): JoinAcceptMessage {
+function decodeJoinAcceptMessage(
+	view: DataView,
+	limits: ProtocolLimits,
+): JoinAcceptMessage {
 	const msgType = MessageType.JoinAccept;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset, msgType);
+	const [playerId, playerIdLen] = readString(
+		view,
+		offset,
+		msgType,
+		limits.maxStringLength,
+	);
 	offset += playerIdLen;
-	const [roomId, roomIdLen] = readString(view, offset, msgType);
+	const [roomId, roomIdLen] = readString(
+		view,
+		offset,
+		msgType,
+		limits.maxStringLength,
+	);
 	offset += roomIdLen;
 	ensureBytes(view, offset, 2, msgType);
 	const tickRate = view.getUint16(offset);
@@ -821,9 +978,20 @@ function decodeJoinAcceptMessage(view: DataView): JoinAcceptMessage {
 	const maxPlayers = view.getUint8(offset++);
 	const playerCount = view.getUint8(offset++);
 
+	// Validate player count against limit
+	if (playerCount > limits.maxPlayerCount) {
+		throw new DecodeError(
+			`Player count exceeds maximum of ${limits.maxPlayerCount}`,
+			msgType,
+			offset - 1,
+			limits.maxPlayerCount,
+			playerCount,
+		);
+	}
+
 	const players: PlayerId[] = [];
 	for (let i = 0; i < playerCount; i++) {
-		const [p, pLen] = readString(view, offset, msgType);
+		const [p, pLen] = readString(view, offset, msgType, limits.maxStringLength);
 		offset += pLen;
 		players.push(asPlayerId(p));
 	}
@@ -858,12 +1026,20 @@ function encodeJoinRejectMessage(msg: JoinRejectMessage): Uint8Array {
 	return buffer;
 }
 
-function decodeJoinRejectMessage(view: DataView): JoinRejectMessage {
+function decodeJoinRejectMessage(
+	view: DataView,
+	limits: ProtocolLimits,
+): JoinRejectMessage {
 	const msgType = MessageType.JoinReject;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset, msgType);
+	const [playerId, playerIdLen] = readString(
+		view,
+		offset,
+		msgType,
+		limits.maxStringLength,
+	);
 	offset += playerIdLen;
-	const [reason] = readString(view, offset, msgType);
+	const [reason] = readString(view, offset, msgType, limits.maxStringLength);
 
 	return {
 		type: MessageType.JoinReject,
@@ -918,7 +1094,10 @@ function encodeStateSyncMessage(msg: StateSyncMessage): Uint8Array {
 	return buffer;
 }
 
-function decodeStateSyncMessage(view: DataView): StateSyncMessage {
+function decodeStateSyncMessage(
+	view: DataView,
+	limits: ProtocolLimits,
+): StateSyncMessage {
 	const msgType = MessageType.StateSync;
 	let offset = 1;
 	ensureBytes(view, offset, 4, msgType);
@@ -928,16 +1107,33 @@ function decodeStateSyncMessage(view: DataView): StateSyncMessage {
 	// Hash is unsigned (game.hash() returns h >>> 0)
 	const hash = view.getUint32(offset);
 	offset += 4;
-	const [state, stateLen] = readBytes(view, offset, msgType);
+	const [state, stateLen] = readBytes(view, offset, msgType, limits.maxStateSize);
 	offset += stateLen;
 
 	ensureBytes(view, offset, 2, msgType);
 	const playerCount = view.getUint16(offset);
 	offset += 2;
+
+	// Validate player count against limit
+	if (playerCount > limits.maxPlayerCount) {
+		throw new DecodeError(
+			`Player count exceeds maximum of ${limits.maxPlayerCount}`,
+			msgType,
+			offset - 2,
+			limits.maxPlayerCount,
+			playerCount,
+		);
+	}
+
 	const playerTimeline: StateSyncMessage["playerTimeline"] = [];
 
 	for (let i = 0; i < playerCount; i++) {
-		const [playerId, idLen] = readString(view, offset, msgType);
+		const [playerId, idLen] = readString(
+			view,
+			offset,
+			msgType,
+			limits.maxStringLength,
+		);
 		offset += idLen;
 		ensureBytes(view, offset, 4, msgType);
 		const joinTick = asTick(view.getInt32(offset));
@@ -986,10 +1182,18 @@ function encodePlayerJoinedMessage(msg: PlayerJoinedMessage): Uint8Array {
 	return buffer;
 }
 
-function decodePlayerJoinedMessage(view: DataView): PlayerJoinedMessage {
+function decodePlayerJoinedMessage(
+	view: DataView,
+	limits: ProtocolLimits,
+): PlayerJoinedMessage {
 	const msgType = MessageType.PlayerJoined;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset, msgType);
+	const [playerId, playerIdLen] = readString(
+		view,
+		offset,
+		msgType,
+		limits.maxStringLength,
+	);
 	offset += playerIdLen;
 	ensureBytes(view, offset, 5, msgType); // 4 for tick + 1 for role
 	const joinTick = asTick(view.getInt32(offset));
@@ -1022,10 +1226,18 @@ function encodePlayerLeftMessage(msg: PlayerLeftMessage): Uint8Array {
 	return buffer;
 }
 
-function decodePlayerLeftMessage(view: DataView): PlayerLeftMessage {
+function decodePlayerLeftMessage(
+	view: DataView,
+	limits: ProtocolLimits,
+): PlayerLeftMessage {
 	const msgType = MessageType.PlayerLeft;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset, msgType);
+	const [playerId, playerIdLen] = readString(
+		view,
+		offset,
+		msgType,
+		limits.maxStringLength,
+	);
 	offset += playerIdLen;
 	ensureBytes(view, offset, 4, msgType);
 	const leaveTick = asTick(view.getInt32(offset));
@@ -1105,10 +1317,18 @@ function encodeLagReportMessage(msg: LagReportMessage): Uint8Array {
 	return buffer;
 }
 
-function decodeLagReportMessage(view: DataView): LagReportMessage {
+function decodeLagReportMessage(
+	view: DataView,
+	limits: ProtocolLimits,
+): LagReportMessage {
 	const msgType = MessageType.LagReport;
 	let offset = 1;
-	const [laggyPlayerId, playerIdLen] = readString(view, offset, msgType);
+	const [laggyPlayerId, playerIdLen] = readString(
+		view,
+		offset,
+		msgType,
+		limits.maxStringLength,
+	);
 	offset += playerIdLen;
 	ensureBytes(view, offset, 4, msgType);
 	const ticksBehind = view.getInt32(offset);
@@ -1141,9 +1361,15 @@ function encodeDisconnectReportMessage(
 
 function decodeDisconnectReportMessage(
 	view: DataView,
+	limits: ProtocolLimits,
 ): DisconnectReportMessage {
 	const msgType = MessageType.DisconnectReport;
-	const [disconnectedPeerId] = readString(view, 1, msgType);
+	const [disconnectedPeerId] = readString(
+		view,
+		1,
+		msgType,
+		limits.maxStringLength,
+	);
 
 	return {
 		type: MessageType.DisconnectReport,
@@ -1203,10 +1429,18 @@ function encodeDropPlayerMessage(msg: DropPlayerMessage): Uint8Array {
 	return buffer;
 }
 
-function decodeDropPlayerMessage(view: DataView): DropPlayerMessage {
+function decodeDropPlayerMessage(
+	view: DataView,
+	limits: ProtocolLimits,
+): DropPlayerMessage {
 	const msgType = MessageType.DropPlayer;
 	let offset = 1;
-	const [playerId, playerIdLen] = readString(view, offset, msgType);
+	const [playerId, playerIdLen] = readString(
+		view,
+		offset,
+		msgType,
+		limits.maxStringLength,
+	);
 	offset += playerIdLen;
 	ensureBytes(view, offset, 1, msgType);
 	const hasMetadata = view.getUint8(offset++) === 1;
@@ -1217,7 +1451,8 @@ function decodeDropPlayerMessage(view: DataView): DropPlayerMessage {
 		playerId: asPlayerId(playerId),
 	};
 	if (hasMetadata) {
-		const [data] = readBytes(view, offset, msgType);
+		// Use maxStateSize for metadata as well since it's arbitrary game data
+		const [data] = readBytes(view, offset, msgType, limits.maxStateSize);
 		result.metadata = data;
 	}
 	return result;

@@ -66,44 +66,71 @@ describe("types", () => {
 			assert.doesNotThrow(() => validateTick(TICK_MIN));
 		});
 
-		it("should throw for negative ticks below TICK_MIN", () => {
-			assert.throws(
-				() => validateTick(-2),
-				/Invalid tick: -2/,
-			);
-			assert.throws(
-				() => validateTick(-100),
-				/Invalid tick/,
-			);
+		it("should throw ValidationError for negative ticks below TICK_MIN", () => {
+			try {
+				validateTick(-2);
+				assert.fail("Expected ValidationError");
+			} catch (error) {
+				assert.ok(error instanceof ValidationError);
+				assert.strictEqual(error.field, "tick");
+				assert.strictEqual(error.value, -2);
+			}
+
+			try {
+				validateTick(-100);
+				assert.fail("Expected ValidationError");
+			} catch (error) {
+				assert.ok(error instanceof ValidationError);
+				assert.strictEqual(error.field, "tick");
+				assert.strictEqual(error.value, -100);
+			}
 		});
 
-		it("should throw for non-integer values", () => {
-			assert.throws(
-				() => validateTick(1.5),
-				/Invalid tick: 1.5/,
-			);
-			assert.throws(
-				() => validateTick(0.1),
-				/Invalid tick/,
-			);
+		it("should throw ValidationError for non-integer values", () => {
+			try {
+				validateTick(1.5);
+				assert.fail("Expected ValidationError");
+			} catch (error) {
+				assert.ok(error instanceof ValidationError);
+				assert.strictEqual(error.field, "tick");
+				assert.strictEqual(error.value, 1.5);
+			}
+
+			try {
+				validateTick(0.1);
+				assert.fail("Expected ValidationError");
+			} catch (error) {
+				assert.ok(error instanceof ValidationError);
+				assert.strictEqual(error.field, "tick");
+			}
 		});
 
-		it("should throw for NaN", () => {
-			assert.throws(
-				() => validateTick(NaN),
-				/Invalid tick/,
-			);
+		it("should throw ValidationError for NaN", () => {
+			try {
+				validateTick(NaN);
+				assert.fail("Expected ValidationError");
+			} catch (error) {
+				assert.ok(error instanceof ValidationError);
+				assert.strictEqual(error.field, "tick");
+			}
 		});
 
-		it("should throw for Infinity", () => {
-			assert.throws(
-				() => validateTick(Infinity),
-				/Invalid tick/,
-			);
-			assert.throws(
-				() => validateTick(-Infinity),
-				/Invalid tick/,
-			);
+		it("should throw ValidationError for Infinity", () => {
+			try {
+				validateTick(Infinity);
+				assert.fail("Expected ValidationError");
+			} catch (error) {
+				assert.ok(error instanceof ValidationError);
+				assert.strictEqual(error.field, "tick");
+			}
+
+			try {
+				validateTick(-Infinity);
+				assert.fail("Expected ValidationError");
+			} catch (error) {
+				assert.ok(error instanceof ValidationError);
+				assert.strictEqual(error.field, "tick");
+			}
 		});
 	});
 
@@ -114,18 +141,23 @@ describe("types", () => {
 			assert.doesNotThrow(() => validatePlayerId("player:123@test.com"));
 		});
 
-		it("should throw for empty string", () => {
-			assert.throws(
-				() => validatePlayerId(""),
-				/Invalid player ID: ""/,
-			);
+		it("should throw ValidationError for empty string", () => {
+			try {
+				validatePlayerId("");
+				assert.fail("Expected ValidationError");
+			} catch (error) {
+				assert.ok(error instanceof ValidationError);
+				assert.strictEqual(error.field, "playerId");
+				assert.strictEqual(error.value, "");
+				assert.ok(error.message.includes("non-empty string"));
+			}
 		});
 
 		it("should throw with descriptive message", () => {
 			try {
 				validatePlayerId("");
 			} catch (e) {
-				assert.ok(e instanceof Error);
+				assert.ok(e instanceof ValidationError);
 				assert.ok(e.message.includes("must be a non-empty string"));
 			}
 		});
@@ -178,6 +210,21 @@ describe("types", () => {
 		it("should throw on negative tickRate", () => {
 			assert.throws(
 				() => validateSessionConfig({ ...validConfig, tickRate: -1 }),
+				ValidationError,
+			);
+		});
+
+		it("should throw on zero maxSpeculationTicks", () => {
+			assert.throws(
+				() => validateSessionConfig({ ...validConfig, maxSpeculationTicks: 0 }),
+				ValidationError,
+			);
+		});
+
+		it("should throw on negative maxSpeculationTicks", () => {
+			assert.throws(
+				() =>
+					validateSessionConfig({ ...validConfig, maxSpeculationTicks: -1 }),
 				ValidationError,
 			);
 		});

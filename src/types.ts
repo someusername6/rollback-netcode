@@ -40,12 +40,14 @@ export function asTick(n: number): Tick {
  * Validate that a number is a valid tick value.
  *
  * @param n - The number to validate
- * @throws Error if the value is not a valid tick (must be integer >= -1)
+ * @throws ValidationError if the value is not a valid tick (must be integer >= -1)
  */
 export function validateTick(n: number): void {
 	if (!Number.isInteger(n) || n < TICK_MIN) {
-		throw new Error(
-			`Invalid tick: ${n}. Tick must be an integer >= ${TICK_MIN}`,
+		throw new ValidationError(
+			`Tick must be an integer >= ${TICK_MIN}`,
+			"tick",
+			n,
 		);
 	}
 }
@@ -64,12 +66,14 @@ export function asPlayerId(s: string): PlayerId {
  * Validate that a string is a valid player ID.
  *
  * @param s - The string to validate
- * @throws Error if the value is not a valid player ID (must be non-empty string)
+ * @throws ValidationError if the value is not a valid player ID (must be non-empty string)
  */
 export function validatePlayerId(s: string): void {
 	if (typeof s !== "string" || s.length === 0) {
-		throw new Error(
-			`Invalid player ID: "${s}". Player ID must be a non-empty string`,
+		throw new ValidationError(
+			"Player ID must be a non-empty string",
+			"playerId",
+			s,
 		);
 	}
 }
@@ -292,6 +296,14 @@ export function validateSessionConfig(config: SessionConfig): void {
 			`maxPlayers must be between 1 and ${MAX_PLAYERS_LIMIT}`,
 			"maxPlayers",
 			config.maxPlayers,
+		);
+	}
+
+	if (config.maxSpeculationTicks <= 0) {
+		throw new ValidationError(
+			"maxSpeculationTicks must be greater than 0",
+			"maxSpeculationTicks",
+			config.maxSpeculationTicks,
 		);
 	}
 

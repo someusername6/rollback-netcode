@@ -1161,17 +1161,33 @@ export class Session {
 		// Clear pending hash comparisons since our state has been reset
 		this.pendingHashMessages = [];
 
-		// Update player list
+		// Update player list from timeline
 		for (const entry of message.playerTimeline) {
+			// Determine connection state from leaveTick
+			const connectionState =
+				entry.leaveTick !== null
+					? PlayerConnectionState.Disconnected
+					: PlayerConnectionState.Connected;
+
 			if (!this.playerManager.hasPlayer(entry.playerId)) {
+				// Add new player
 				this.playerManager.addPlayer({
 					id: entry.playerId,
-					connectionState: PlayerConnectionState.Connected,
+					connectionState,
 					joinTick: entry.joinTick,
 					leaveTick: entry.leaveTick,
 					isHost: false,
 					role: PlayerRole.Player, // Default to player; role info may come from elsewhere
 				});
+			} else {
+				// Update existing player's state from authoritative timeline
+				// This handles the case where JoinAccept added the player before StateSync
+				const existingPlayer = this.playerManager.getPlayer(entry.playerId);
+				if (existingPlayer) {
+					existingPlayer.connectionState = connectionState;
+					existingPlayer.joinTick = entry.joinTick;
+					existingPlayer.leaveTick = entry.leaveTick;
+				}
 			}
 		}
 
@@ -1225,8 +1241,10 @@ export class Session {
 			return;
 		}
 
-		// Check if room is full
-		if (this.playerManager.size >= this.config.maxPlayers) {
+		// Check if room is full (only count connected players, not disconnected ones)
+		if (
+			this.playerManager.getConnectedPlayers().length >= this.config.maxPlayers
+		) {
 			this.sendToPeer(peerId, createJoinReject(playerId, "Room is full"), true);
 			return;
 		}

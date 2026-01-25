@@ -5,6 +5,15 @@ function asTick(n) {
 function asPlayerId(s) {
   return s;
 }
+function validatePlayerId(s) {
+  if (typeof s !== "string" || s.length === 0) {
+    throw new ValidationError(
+      "Player ID must be a non-empty string",
+      "playerId",
+      s
+    );
+  }
+}
 function playerIdToPeerId(playerId) {
   return playerId;
 }
@@ -37,6 +46,13 @@ function validateSessionConfig(config) {
       `maxPlayers must be between 1 and ${MAX_PLAYERS_LIMIT}`,
       "maxPlayers",
       config.maxPlayers
+    );
+  }
+  if (config.maxSpeculationTicks <= 0) {
+    throw new ValidationError(
+      "maxSpeculationTicks must be greater than 0",
+      "maxSpeculationTicks",
+      config.maxSpeculationTicks
     );
   }
   if (config.snapshotHistorySize < config.maxSpeculationTicks) {
@@ -131,6 +147,16 @@ var ValidationError = class extends Error {
     this.name = "ValidationError";
   }
 };
+var GameError = class extends Error {
+  constructor(operation, tick, cause) {
+    super(`Game ${operation}() failed at tick ${tick}: ${cause.message}`, {
+      cause
+    });
+    this.operation = operation;
+    this.tick = tick;
+    this.name = "GameError";
+  }
+};
 
 // src/debug.ts
 function createDebugLogger(enabled) {
@@ -218,6 +244,14 @@ function ensureBytes(view, offset, needed, messageType) {
 }
 var textEncoder = new TextEncoder();
 var textDecoder = new TextDecoder();
+var MAX_INPUT_SIZE_PER_FRAME = 1024;
+var MAX_INPUT_MESSAGE_SIZE = 65536;
+var DEFAULT_PROTOCOL_LIMITS = {
+  maxStringLength: 1024,
+  maxPlayerCount: 256,
+  maxStateSize: 1e6
+  // 1MB
+};
 function encodePlayerRole(role) {
   return role;
 }
@@ -246,9 +280,18 @@ function writeString(view, offset, str) {
   uint8View.set(bytes);
   return 2 + bytes.length;
 }
-function readString(view, offset, messageType) {
+function readString(view, offset, messageType, maxLength) {
   ensureBytes(view, offset, 2, messageType);
   const length = view.getUint16(offset);
+  if (maxLength !== void 0 && length > maxLength) {
+    throw new DecodeError(
+      `String length exceeds maximum of ${maxLength} bytes`,
+      messageType,
+      offset,
+      maxLength,
+      length
+    );
+  }
   ensureBytes(view, offset + 2, length, messageType);
   const bytes = new Uint8Array(
     view.buffer,
@@ -263,9 +306,18 @@ function writeBytes(view, offset, data) {
   uint8View.set(data);
   return 4 + data.length;
 }
-function readBytes(view, offset, messageType) {
+function readBytes(view, offset, messageType, maxSize) {
   ensureBytes(view, offset, 4, messageType);
   const length = view.getUint32(offset);
+  if (maxSize !== void 0 && length > maxSize) {
+    throw new DecodeError(
+      `Byte array size exceeds maximum of ${maxSize} bytes`,
+      messageType,
+      offset,
+      maxSize,
+      length
+    );
+  }
   ensureBytes(view, offset + 4, length, messageType);
   const data = new Uint8Array(length);
   data.set(new Uint8Array(view.buffer, view.byteOffset + offset + 4, length));
@@ -313,7 +365,7 @@ function encodeMessage(message) {
       return encodeDropPlayerMessage(message);
   }
 }
-function decodeMessage(data) {
+function decodeMessage(data, limits = DEFAULT_PROTOCOL_LIMITS) {
   if (data.length === 0) {
     throw new DecodeError("Empty message", void 0, 0, 1, 0);
   }
@@ -321,43 +373,43 @@ function decodeMessage(data) {
   const type = view.getUint8(0);
   switch (type) {
     case 1 /* Input */:
-      return decodeInputMessage(view);
+      return decodeInputMessage(view, limits);
     case 2 /* InputAck */:
-      return decodeInputAckMessage(view);
+      return decodeInputAckMessage(view, limits);
     case 16 /* Hash */:
-      return decodeHashMessage(view);
+      return decodeHashMessage(view, limits);
     case 17 /* Sync */:
-      return decodeSyncMessage(view);
+      return decodeSyncMessage(view, limits);
     case 18 /* SyncRequest */:
-      return decodeSyncRequestMessage(view);
+      return decodeSyncRequestMessage(view, limits);
     case 32 /* Pause */:
-      return decodePauseMessage(view);
+      return decodePauseMessage(view, limits);
     case 33 /* Resume */:
-      return decodeResumeMessage(view);
+      return decodeResumeMessage(view, limits);
     case 48 /* JoinRequest */:
-      return decodeJoinRequestMessage(view);
+      return decodeJoinRequestMessage(view, limits);
     case 49 /* JoinAccept */:
-      return decodeJoinAcceptMessage(view);
+      return decodeJoinAcceptMessage(view, limits);
     case 50 /* JoinReject */:
-      return decodeJoinRejectMessage(view);
+      return decodeJoinRejectMessage(view, limits);
     case 51 /* StateSync */:
-      return decodeStateSyncMessage(view);
+      return decodeStateSyncMessage(view, limits);
     case 52 /* PlayerJoined */:
-      return decodePlayerJoinedMessage(view);
+      return decodePlayerJoinedMessage(view, limits);
     case 53 /* PlayerLeft */:
-      return decodePlayerLeftMessage(view);
+      return decodePlayerLeftMessage(view, limits);
     case 64 /* Ping */:
       return decodePingMessage(view);
     case 65 /* Pong */:
       return decodePongMessage(view);
     case 34 /* LagReport */:
-      return decodeLagReportMessage(view);
+      return decodeLagReportMessage(view, limits);
     case 35 /* DisconnectReport */:
-      return decodeDisconnectReportMessage(view);
+      return decodeDisconnectReportMessage(view, limits);
     case 36 /* ResumeCountdown */:
       return decodeResumeCountdownMessage(view);
     case 37 /* DropPlayer */:
-      return decodeDropPlayerMessage(view);
+      return decodeDropPlayerMessage(view, limits);
     default:
       throw new DecodeError(
         `Unknown message type: ${type}`,
@@ -377,12 +429,31 @@ function encodeInputMessage(msg) {
       msg.inputs.length
     );
   }
+  for (let i = 0; i < msg.inputs.length; i++) {
+    const entry = msg.inputs[i];
+    if (entry && entry.input.length > MAX_INPUT_SIZE_PER_FRAME) {
+      throw new EncodeError(
+        "Individual input size exceeds maximum",
+        `inputs[${i}].input.length`,
+        MAX_INPUT_SIZE_PER_FRAME,
+        entry.input.length
+      );
+    }
+  }
   const playerIdBytes = textEncoder.encode(msg.playerId);
   let totalSize = 1 + // type
   2 + playerIdBytes.length + // playerId
   1;
   for (const entry of msg.inputs) {
     totalSize += 4 + 2 + entry.input.length;
+  }
+  if (totalSize > MAX_INPUT_MESSAGE_SIZE) {
+    throw new EncodeError(
+      "Total input message size exceeds maximum",
+      "totalSize",
+      MAX_INPUT_MESSAGE_SIZE,
+      totalSize
+    );
   }
   const buffer = new Uint8Array(totalSize);
   const view = new DataView(buffer.buffer);
@@ -400,10 +471,24 @@ function encodeInputMessage(msg) {
   }
   return buffer;
 }
-function decodeInputMessage(view) {
+function decodeInputMessage(view, limits) {
   const msgType = 1 /* Input */;
+  if (view.byteLength > MAX_INPUT_MESSAGE_SIZE) {
+    throw new DecodeError(
+      `Input message exceeds maximum size of ${MAX_INPUT_MESSAGE_SIZE} bytes`,
+      msgType,
+      0,
+      MAX_INPUT_MESSAGE_SIZE,
+      view.byteLength
+    );
+  }
   let offset = 1;
-  const [playerId, playerIdLen] = readString(view, offset, msgType);
+  const [playerId, playerIdLen] = readString(
+    view,
+    offset,
+    msgType,
+    limits.maxStringLength
+  );
   offset += playerIdLen;
   ensureBytes(view, offset, 1, msgType);
   const inputCount = view.getUint8(offset++);
@@ -415,6 +500,15 @@ function decodeInputMessage(view) {
     ensureBytes(view, offset, 2, msgType);
     const inputLen = view.getUint16(offset);
     offset += 2;
+    if (inputLen > MAX_INPUT_SIZE_PER_FRAME) {
+      throw new DecodeError(
+        `Input frame ${i} exceeds maximum size of ${MAX_INPUT_SIZE_PER_FRAME} bytes`,
+        msgType,
+        offset - 2,
+        MAX_INPUT_SIZE_PER_FRAME,
+        inputLen
+      );
+    }
     ensureBytes(view, offset, inputLen, msgType);
     const input = new Uint8Array(inputLen);
     input.set(new Uint8Array(view.buffer, view.byteOffset + offset, inputLen));
@@ -437,10 +531,15 @@ function encodeInputAckMessage(msg) {
   view.setInt32(offset, msg.ackedTick);
   return buffer;
 }
-function decodeInputAckMessage(view) {
+function decodeInputAckMessage(view, limits) {
   const msgType = 2 /* InputAck */;
   let offset = 1;
-  const [playerId, playerIdLen] = readString(view, offset, msgType);
+  const [playerId, playerIdLen] = readString(
+    view,
+    offset,
+    msgType,
+    limits.maxStringLength
+  );
   offset += playerIdLen;
   ensureBytes(view, offset, 4, msgType);
   const ackedTick = asTick(view.getInt32(offset));
@@ -462,10 +561,15 @@ function encodeHashMessage(msg) {
   view.setUint32(offset, msg.hash);
   return buffer;
 }
-function decodeHashMessage(view) {
+function decodeHashMessage(view, limits) {
   const msgType = 16 /* Hash */;
   let offset = 1;
-  const [playerId, playerIdLen] = readString(view, offset, msgType);
+  const [playerId, playerIdLen] = readString(
+    view,
+    offset,
+    msgType,
+    limits.maxStringLength
+  );
   offset += playerIdLen;
   ensureBytes(view, offset, 4, msgType);
   const tick = asTick(view.getInt32(offset));
@@ -512,7 +616,7 @@ function encodeSyncMessage(msg) {
   }
   return buffer;
 }
-function decodeSyncMessage(view) {
+function decodeSyncMessage(view, limits) {
   const msgType = 17 /* Sync */;
   let offset = 1;
   ensureBytes(view, offset, 4, msgType);
@@ -521,14 +625,28 @@ function decodeSyncMessage(view) {
   ensureBytes(view, offset, 4, msgType);
   const hash = view.getUint32(offset);
   offset += 4;
-  const [state, stateLen] = readBytes(view, offset, msgType);
+  const [state, stateLen] = readBytes(view, offset, msgType, limits.maxStateSize);
   offset += stateLen;
   ensureBytes(view, offset, 2, msgType);
   const playerCount = view.getUint16(offset);
   offset += 2;
+  if (playerCount > limits.maxPlayerCount) {
+    throw new DecodeError(
+      `Player count exceeds maximum of ${limits.maxPlayerCount}`,
+      msgType,
+      offset - 2,
+      limits.maxPlayerCount,
+      playerCount
+    );
+  }
   const playerTimeline = [];
   for (let i = 0; i < playerCount; i++) {
-    const [playerId, idLen] = readString(view, offset, msgType);
+    const [playerId, idLen] = readString(
+      view,
+      offset,
+      msgType,
+      limits.maxStringLength
+    );
     offset += idLen;
     ensureBytes(view, offset, 4, msgType);
     const joinTick = asTick(view.getInt32(offset));
@@ -566,10 +684,15 @@ function encodeSyncRequestMessage(msg) {
   view.setUint32(offset, msg.localHash);
   return buffer;
 }
-function decodeSyncRequestMessage(view) {
+function decodeSyncRequestMessage(view, limits) {
   const msgType = 18 /* SyncRequest */;
   let offset = 1;
-  const [playerId, playerIdLen] = readString(view, offset, msgType);
+  const [playerId, playerIdLen] = readString(
+    view,
+    offset,
+    msgType,
+    limits.maxStringLength
+  );
   offset += playerIdLen;
   ensureBytes(view, offset, 4, msgType);
   const desyncTick = asTick(view.getInt32(offset));
@@ -595,10 +718,15 @@ function encodePauseMessage(msg) {
   view.setUint8(offset, encodePauseReason(msg.reason));
   return buffer;
 }
-function decodePauseMessage(view) {
+function decodePauseMessage(view, limits) {
   const msgType = 32 /* Pause */;
   let offset = 1;
-  const [playerId, playerIdLen] = readString(view, offset, msgType);
+  const [playerId, playerIdLen] = readString(
+    view,
+    offset,
+    msgType,
+    limits.maxStringLength
+  );
   offset += playerIdLen;
   ensureBytes(view, offset, 5, msgType);
   const pauseTick = asTick(view.getInt32(offset));
@@ -621,10 +749,15 @@ function encodeResumeMessage(msg) {
   view.setInt32(offset, msg.resumeTick);
   return buffer;
 }
-function decodeResumeMessage(view) {
+function decodeResumeMessage(view, limits) {
   const msgType = 33 /* Resume */;
   let offset = 1;
-  const [playerId, playerIdLen] = readString(view, offset, msgType);
+  const [playerId, playerIdLen] = readString(
+    view,
+    offset,
+    msgType,
+    limits.maxStringLength
+  );
   offset += playerIdLen;
   ensureBytes(view, offset, 4, msgType);
   const resumeTick = asTick(view.getInt32(offset));
@@ -647,10 +780,15 @@ function encodeJoinRequestMessage(msg) {
   );
   return buffer;
 }
-function decodeJoinRequestMessage(view) {
+function decodeJoinRequestMessage(view, limits) {
   const msgType = 48 /* JoinRequest */;
   let offset = 1;
-  const [playerId, playerIdLen] = readString(view, offset, msgType);
+  const [playerId, playerIdLen] = readString(
+    view,
+    offset,
+    msgType,
+    limits.maxStringLength
+  );
   offset += playerIdLen;
   let role;
   if (view.byteLength > offset) {
@@ -692,12 +830,22 @@ function encodeJoinAcceptMessage(msg) {
   }
   return buffer;
 }
-function decodeJoinAcceptMessage(view) {
+function decodeJoinAcceptMessage(view, limits) {
   const msgType = 49 /* JoinAccept */;
   let offset = 1;
-  const [playerId, playerIdLen] = readString(view, offset, msgType);
+  const [playerId, playerIdLen] = readString(
+    view,
+    offset,
+    msgType,
+    limits.maxStringLength
+  );
   offset += playerIdLen;
-  const [roomId, roomIdLen] = readString(view, offset, msgType);
+  const [roomId, roomIdLen] = readString(
+    view,
+    offset,
+    msgType,
+    limits.maxStringLength
+  );
   offset += roomIdLen;
   ensureBytes(view, offset, 2, msgType);
   const tickRate = view.getUint16(offset);
@@ -705,9 +853,18 @@ function decodeJoinAcceptMessage(view) {
   ensureBytes(view, offset, 2, msgType);
   const maxPlayers = view.getUint8(offset++);
   const playerCount = view.getUint8(offset++);
+  if (playerCount > limits.maxPlayerCount) {
+    throw new DecodeError(
+      `Player count exceeds maximum of ${limits.maxPlayerCount}`,
+      msgType,
+      offset - 1,
+      limits.maxPlayerCount,
+      playerCount
+    );
+  }
   const players = [];
   for (let i = 0; i < playerCount; i++) {
-    const [p, pLen] = readString(view, offset, msgType);
+    const [p, pLen] = readString(view, offset, msgType, limits.maxStringLength);
     offset += pLen;
     players.push(asPlayerId(p));
   }
@@ -729,15 +886,20 @@ function encodeJoinRejectMessage(msg) {
   let offset = 0;
   view.setUint8(offset++, 50 /* JoinReject */);
   offset += writeString(view, offset, msg.playerId);
-  writeString(view, offset, msg.reason);
+  offset += writeString(view, offset, msg.reason);
   return buffer;
 }
-function decodeJoinRejectMessage(view) {
+function decodeJoinRejectMessage(view, limits) {
   const msgType = 50 /* JoinReject */;
   let offset = 1;
-  const [playerId, playerIdLen] = readString(view, offset, msgType);
+  const [playerId, playerIdLen] = readString(
+    view,
+    offset,
+    msgType,
+    limits.maxStringLength
+  );
   offset += playerIdLen;
-  const [reason] = readString(view, offset, msgType);
+  const [reason] = readString(view, offset, msgType, limits.maxStringLength);
   return {
     type: 50 /* JoinReject */,
     playerId: asPlayerId(playerId),
@@ -777,7 +939,7 @@ function encodeStateSyncMessage(msg) {
   }
   return buffer;
 }
-function decodeStateSyncMessage(view) {
+function decodeStateSyncMessage(view, limits) {
   const msgType = 51 /* StateSync */;
   let offset = 1;
   ensureBytes(view, offset, 4, msgType);
@@ -786,14 +948,28 @@ function decodeStateSyncMessage(view) {
   ensureBytes(view, offset, 4, msgType);
   const hash = view.getUint32(offset);
   offset += 4;
-  const [state, stateLen] = readBytes(view, offset, msgType);
+  const [state, stateLen] = readBytes(view, offset, msgType, limits.maxStateSize);
   offset += stateLen;
   ensureBytes(view, offset, 2, msgType);
   const playerCount = view.getUint16(offset);
   offset += 2;
+  if (playerCount > limits.maxPlayerCount) {
+    throw new DecodeError(
+      `Player count exceeds maximum of ${limits.maxPlayerCount}`,
+      msgType,
+      offset - 2,
+      limits.maxPlayerCount,
+      playerCount
+    );
+  }
   const playerTimeline = [];
   for (let i = 0; i < playerCount; i++) {
-    const [playerId, idLen] = readString(view, offset, msgType);
+    const [playerId, idLen] = readString(
+      view,
+      offset,
+      msgType,
+      limits.maxStringLength
+    );
     offset += idLen;
     ensureBytes(view, offset, 4, msgType);
     const joinTick = asTick(view.getInt32(offset));
@@ -831,10 +1007,15 @@ function encodePlayerJoinedMessage(msg) {
   view.setUint8(offset, encodePlayerRole(msg.role));
   return buffer;
 }
-function decodePlayerJoinedMessage(view) {
+function decodePlayerJoinedMessage(view, limits) {
   const msgType = 52 /* PlayerJoined */;
   let offset = 1;
-  const [playerId, playerIdLen] = readString(view, offset, msgType);
+  const [playerId, playerIdLen] = readString(
+    view,
+    offset,
+    msgType,
+    limits.maxStringLength
+  );
   offset += playerIdLen;
   ensureBytes(view, offset, 5, msgType);
   const joinTick = asTick(view.getInt32(offset));
@@ -857,10 +1038,15 @@ function encodePlayerLeftMessage(msg) {
   view.setInt32(offset, msg.leaveTick);
   return buffer;
 }
-function decodePlayerLeftMessage(view) {
+function decodePlayerLeftMessage(view, limits) {
   const msgType = 53 /* PlayerLeft */;
   let offset = 1;
-  const [playerId, playerIdLen] = readString(view, offset, msgType);
+  const [playerId, playerIdLen] = readString(
+    view,
+    offset,
+    msgType,
+    limits.maxStringLength
+  );
   offset += playerIdLen;
   ensureBytes(view, offset, 4, msgType);
   const leaveTick = asTick(view.getInt32(offset));
@@ -912,10 +1098,15 @@ function encodeLagReportMessage(msg) {
   view.setInt32(offset, msg.ticksBehind);
   return buffer;
 }
-function decodeLagReportMessage(view) {
+function decodeLagReportMessage(view, limits) {
   const msgType = 34 /* LagReport */;
   let offset = 1;
-  const [laggyPlayerId, playerIdLen] = readString(view, offset, msgType);
+  const [laggyPlayerId, playerIdLen] = readString(
+    view,
+    offset,
+    msgType,
+    limits.maxStringLength
+  );
   offset += playerIdLen;
   ensureBytes(view, offset, 4, msgType);
   const ticksBehind = view.getInt32(offset);
@@ -931,12 +1122,17 @@ function encodeDisconnectReportMessage(msg) {
   const view = new DataView(buffer.buffer);
   let offset = 0;
   view.setUint8(offset++, 35 /* DisconnectReport */);
-  writeString(view, offset, msg.disconnectedPeerId);
+  offset += writeString(view, offset, msg.disconnectedPeerId);
   return buffer;
 }
-function decodeDisconnectReportMessage(view) {
+function decodeDisconnectReportMessage(view, limits) {
   const msgType = 35 /* DisconnectReport */;
-  const [disconnectedPeerId] = readString(view, 1, msgType);
+  const [disconnectedPeerId] = readString(
+    view,
+    1,
+    msgType,
+    limits.maxStringLength
+  );
   return {
     type: 35 /* DisconnectReport */,
     disconnectedPeerId: asPlayerId(disconnectedPeerId)
@@ -971,14 +1167,19 @@ function encodeDropPlayerMessage(msg) {
   offset += writeString(view, offset, msg.playerId);
   view.setUint8(offset++, hasMetadata ? 1 : 0);
   if (hasMetadata && msg.metadata) {
-    writeBytes(view, offset, msg.metadata);
+    offset += writeBytes(view, offset, msg.metadata);
   }
   return buffer;
 }
-function decodeDropPlayerMessage(view) {
+function decodeDropPlayerMessage(view, limits) {
   const msgType = 37 /* DropPlayer */;
   let offset = 1;
-  const [playerId, playerIdLen] = readString(view, offset, msgType);
+  const [playerId, playerIdLen] = readString(
+    view,
+    offset,
+    msgType,
+    limits.maxStringLength
+  );
   offset += playerIdLen;
   ensureBytes(view, offset, 1, msgType);
   const hasMetadata = view.getUint8(offset++) === 1;
@@ -987,7 +1188,7 @@ function decodeDropPlayerMessage(view) {
     playerId: asPlayerId(playerId)
   };
   if (hasMetadata) {
-    const [data] = readBytes(view, offset, msgType);
+    const [data] = readBytes(view, offset, msgType, limits.maxStateSize);
     result.metadata = data;
   }
   return result;
@@ -1003,6 +1204,10 @@ function inputsEqual(a, b) {
 }
 var InputBuffer = class {
   players = /* @__PURE__ */ new Map();
+  /** Index of players by their join tick for O(1) lookup */
+  joinsByTick = /* @__PURE__ */ new Map();
+  /** Index of players by their leave tick for O(1) lookup */
+  leavesByTick = /* @__PURE__ */ new Map();
   /**
    * Add a player to the buffer.
    *
@@ -1013,11 +1218,14 @@ var InputBuffer = class {
     const existing = this.players.get(playerId);
     if (existing) {
       if (existing.leaveTick !== null) {
+        this.removeFromTickIndex(this.joinsByTick, existing.joinTick, playerId);
+        this.removeFromTickIndex(this.leavesByTick, existing.leaveTick, playerId);
         existing.joinTick = joinTick;
         existing.leaveTick = null;
         existing.confirmedTick = asTick(joinTick - 1);
         existing.received.clear();
         existing.usedInputs.clear();
+        this.addToTickIndex(this.joinsByTick, joinTick, playerId);
       }
       return;
     }
@@ -1029,6 +1237,7 @@ var InputBuffer = class {
       // No inputs confirmed yet
       usedInputs: /* @__PURE__ */ new Map()
     });
+    this.addToTickIndex(this.joinsByTick, joinTick, playerId);
   }
   /**
    * Mark a player as having left.
@@ -1039,7 +1248,11 @@ var InputBuffer = class {
   removePlayer(playerId, leaveTick) {
     const player = this.players.get(playerId);
     if (player) {
+      if (player.leaveTick !== null) {
+        this.removeFromTickIndex(this.leavesByTick, player.leaveTick, playerId);
+      }
       player.leaveTick = leaveTick;
+      this.addToTickIndex(this.leavesByTick, leaveTick, playerId);
     }
   }
   /**
@@ -1345,6 +1558,13 @@ var InputBuffer = class {
    * @param playerId - The player's ID
    */
   clearPlayer(playerId) {
+    const player = this.players.get(playerId);
+    if (player) {
+      this.removeFromTickIndex(this.joinsByTick, player.joinTick, playerId);
+      if (player.leaveTick !== null) {
+        this.removeFromTickIndex(this.leavesByTick, player.leaveTick, playerId);
+      }
+    }
     this.players.delete(playerId);
   }
   /**
@@ -1352,6 +1572,53 @@ var InputBuffer = class {
    */
   clear() {
     this.players.clear();
+    this.joinsByTick.clear();
+    this.leavesByTick.clear();
+  }
+  /**
+   * Get all players that join at a specific tick.
+   * O(1) lookup using tick-indexed map.
+   *
+   * @param tick - The tick to check
+   * @returns Array of player IDs joining at this tick
+   */
+  getPlayersJoiningAtTick(tick) {
+    const players = this.joinsByTick.get(tick);
+    return players ? Array.from(players) : [];
+  }
+  /**
+   * Get all players that leave at a specific tick.
+   * O(1) lookup using tick-indexed map.
+   *
+   * @param tick - The tick to check
+   * @returns Array of player IDs leaving at this tick
+   */
+  getPlayersLeavingAtTick(tick) {
+    const players = this.leavesByTick.get(tick);
+    return players ? Array.from(players) : [];
+  }
+  /**
+   * Add a player to a tick index.
+   */
+  addToTickIndex(index, tick, playerId) {
+    let players = index.get(tick);
+    if (!players) {
+      players = /* @__PURE__ */ new Set();
+      index.set(tick, players);
+    }
+    players.add(playerId);
+  }
+  /**
+   * Remove a player from a tick index.
+   */
+  removeFromTickIndex(index, tick, playerId) {
+    const players = index.get(tick);
+    if (players) {
+      players.delete(playerId);
+      if (players.size === 0) {
+        index.delete(tick);
+      }
+    }
   }
 };
 
@@ -1567,6 +1834,7 @@ var RollbackEngine = class {
   maxSpeculationTicks;
   onPlayerAddDuringResimulation;
   onPlayerRemoveDuringResimulation;
+  onRollback;
   _currentTick;
   _confirmedTick;
   localInputs = /* @__PURE__ */ new Map();
@@ -1580,6 +1848,7 @@ var RollbackEngine = class {
     this.inputPredictor = config.inputPredictor ?? DEFAULT_INPUT_PREDICTOR;
     this.onPlayerAddDuringResimulation = config.onPlayerAddDuringResimulation;
     this.onPlayerRemoveDuringResimulation = config.onPlayerRemoveDuringResimulation;
+    this.onRollback = config.onRollback;
     this.snapshotBuffer = new SnapshotBuffer(config.snapshotHistorySize ?? 120);
     this.inputBuffer = new InputBuffer();
     this._currentTick = asTick(0);
@@ -1666,9 +1935,10 @@ var RollbackEngine = class {
    */
   saveInitialSnapshot() {
     if (!this.snapshotBuffer.has(asTick(-1))) {
-      const state = this.game.serialize();
-      const hash = this.game.hash();
-      this.snapshotBuffer.save(asTick(-1), state, hash);
+      const tick = asTick(-1);
+      const state = this.gameSerialize(tick);
+      const hash = this.gameHash(tick);
+      this.snapshotBuffer.save(tick, state, hash);
     }
   }
   /**
@@ -1701,9 +1971,9 @@ var RollbackEngine = class {
     }
     const rollbackResult = this.checkAndRollback();
     const inputs = this.gatherInputs(this._currentTick);
-    this.game.step(inputs);
-    const state = this.game.serialize();
-    const hash = this.game.hash();
+    this.gameStep(this._currentTick, inputs);
+    const state = this.gameSerialize(this._currentTick);
+    const hash = this.gameHash(this._currentTick);
     this.snapshotBuffer.save(this._currentTick, state, hash);
     this.updateConfirmedTick();
     const tickResult = this._currentTick;
@@ -1742,26 +2012,33 @@ var RollbackEngine = class {
       return { rolledBack: false };
     }
     const restoreTick = asTick(earliestMisprediction - 1);
-    const ticksToResimulate = this._currentTick - earliestMisprediction;
-    const snapshot = this.snapshotBuffer.get(restoreTick);
+    let snapshot = this.snapshotBuffer.get(restoreTick);
+    let actualRestoreTick = restoreTick;
     if (!snapshot) {
-      return {
-        rolledBack: false,
-        error: new RollbackError(
-          `Cannot rollback to tick ${restoreTick}: snapshot not available`,
-          restoreTick
-        )
-      };
+      snapshot = this.snapshotBuffer.getAtOrBefore(restoreTick);
+      if (!snapshot) {
+        return {
+          rolledBack: false,
+          error: new RollbackError(
+            `Cannot rollback to tick ${restoreTick}: no snapshots available in buffer`,
+            restoreTick
+          )
+        };
+      }
+      actualRestoreTick = snapshot.tick;
     }
-    this.game.deserialize(snapshot.state);
-    this.inputBuffer.clearAllUsedInputsFrom(earliestMisprediction);
-    for (let tick = earliestMisprediction; tick < this._currentTick; tick++) {
+    const resimulateFromTick = asTick(actualRestoreTick + 1);
+    const ticksToResimulate = this._currentTick - resimulateFromTick;
+    this.gameDeserialize(actualRestoreTick, snapshot.state);
+    this.onRollback?.(actualRestoreTick);
+    this.inputBuffer.clearAllUsedInputsFrom(resimulateFromTick);
+    for (let tick = resimulateFromTick; tick < this._currentTick; tick++) {
       const tickAsTick = asTick(tick);
       this.handlePlayerLifecycleAtTick(tickAsTick);
       const inputs = this.gatherInputs(tickAsTick);
-      this.game.step(inputs);
-      const state = this.game.serialize();
-      const hash = this.game.hash();
+      this.gameStep(tickAsTick, inputs);
+      const state = this.gameSerialize(tickAsTick);
+      const hash = this.gameHash(tickAsTick);
       this.snapshotBuffer.save(tickAsTick, state, hash);
     }
     return {
@@ -1772,24 +2049,19 @@ var RollbackEngine = class {
   /**
    * Handle player add/remove lifecycle events at a specific tick during resimulation.
    * This ensures the game layer knows about player joins/leaves when replaying history.
+   * Uses O(1) tick-indexed lookups instead of iterating all players.
    */
   handlePlayerLifecycleAtTick(tick) {
-    if (!this.onPlayerAddDuringResimulation && !this.onPlayerRemoveDuringResimulation) {
-      return;
-    }
-    const allPlayers = this.inputBuffer.getAllPlayers();
-    for (const playerId of allPlayers) {
-      if (this.onPlayerAddDuringResimulation) {
-        const joinTick = this.inputBuffer.getJoinTick(playerId);
-        if (joinTick === tick) {
-          this.onPlayerAddDuringResimulation(playerId, tick);
-        }
+    if (this.onPlayerAddDuringResimulation) {
+      const joiningPlayers = this.inputBuffer.getPlayersJoiningAtTick(tick);
+      for (const playerId of joiningPlayers) {
+        this.onPlayerAddDuringResimulation(playerId, tick);
       }
-      if (this.onPlayerRemoveDuringResimulation) {
-        const leaveTick = this.inputBuffer.getLeaveTick(playerId);
-        if (leaveTick === tick) {
-          this.onPlayerRemoveDuringResimulation(playerId, tick);
-        }
+    }
+    if (this.onPlayerRemoveDuringResimulation) {
+      const leavingPlayers = this.inputBuffer.getPlayersLeavingAtTick(tick);
+      for (const playerId of leavingPlayers) {
+        this.onPlayerRemoveDuringResimulation(playerId, tick);
       }
     }
   }
@@ -1852,7 +2124,7 @@ var RollbackEngine = class {
    * Get the current game hash.
    */
   getCurrentHash() {
-    return this.game.hash();
+    return this.gameHash(this._currentTick);
   }
   /**
    * Get the current game state and player timeline for sync.
@@ -1873,7 +2145,7 @@ var RollbackEngine = class {
     }
     return {
       tick: this._currentTick,
-      state: this.game.serialize(),
+      state: this.gameSerialize(this._currentTick),
       playerTimeline
     };
   }
@@ -1886,7 +2158,7 @@ var RollbackEngine = class {
    * @param playerTimeline - Timeline of player join/leave events
    */
   setState(tick, state, playerTimeline) {
-    this.game.deserialize(state);
+    this.gameDeserialize(tick, state);
     this.snapshotBuffer.clear();
     this.inputBuffer.clear();
     this.localInputs.clear();
@@ -1897,8 +2169,9 @@ var RollbackEngine = class {
       }
     }
     this.inputBuffer.setConfirmedTickForSync(tick);
-    const hash = this.game.hash();
-    this.snapshotBuffer.save(asTick(tick - 1), state, hash);
+    const snapshotTick = asTick(tick - 1);
+    const hash = this.gameHash(snapshotTick);
+    this.snapshotBuffer.save(snapshotTick, state, hash);
     this._currentTick = tick;
     this._confirmedTick = asTick(tick - 1);
   }
@@ -1959,6 +2232,56 @@ var RollbackEngine = class {
     this._currentTick = asTick(0);
     this._confirmedTick = asTick(-1);
     this.inputBuffer.addPlayer(this.localPlayerId, asTick(0));
+  }
+  // =========================================================================
+  // Game operation wrappers with error handling
+  // =========================================================================
+  /**
+   * Wrap a game operation with error handling.
+   * Catches any error and re-throws it wrapped in a GameError with context.
+   */
+  wrapGameOperation(operation, tick, fn) {
+    try {
+      return fn();
+    } catch (error) {
+      throw new GameError(
+        operation,
+        tick,
+        error instanceof Error ? error : new Error(String(error))
+      );
+    }
+  }
+  /**
+   * Call game.step() with error wrapping.
+   */
+  gameStep(tick, inputs) {
+    this.wrapGameOperation("step", tick, () => this.game.step(inputs));
+  }
+  /**
+   * Call game.serialize() with error wrapping.
+   */
+  gameSerialize(tick) {
+    return this.wrapGameOperation(
+      "serialize",
+      tick,
+      () => this.game.serialize()
+    );
+  }
+  /**
+   * Call game.deserialize() with error wrapping.
+   */
+  gameDeserialize(tick, state) {
+    this.wrapGameOperation(
+      "deserialize",
+      tick,
+      () => this.game.deserialize(state)
+    );
+  }
+  /**
+   * Call game.hash() with error wrapping.
+   */
+  gameHash(tick) {
+    return this.wrapGameOperation("hash", tick, () => this.game.hash());
   }
 };
 
@@ -2695,6 +3018,8 @@ var Session = class _Session {
   rateLimitCleanupTimer = null;
   /** Buffer for deferred hash comparison (processed after rollback in tick()) */
   pendingHashMessages = [];
+  /** Tracks players whose playerJoined event has been emitted to prevent duplicates during resimulation */
+  emittedJoinEvents = /* @__PURE__ */ new Set();
   /**
    * Create a new session.
    * @throws ValidationError if config values are invalid
@@ -2705,6 +3030,7 @@ var Session = class _Session {
     this.config = { ...DEFAULT_SESSION_CONFIG, ...options.config };
     validateSessionConfig(this.config);
     this._localPlayerId = options.localPlayerId ?? asPlayerId(this.transport.localPeerId);
+    validatePlayerId(this._localPlayerId);
     this.topologyStrategy = createTopologyStrategy(this.config.topology);
     this.debug = createDebugLogger(this.config.debug);
     this.playerManager = new PlayerManager();
@@ -2732,10 +3058,15 @@ var Session = class _Session {
       snapshotHistorySize: this.config.snapshotHistorySize,
       maxSpeculationTicks: this.config.maxSpeculationTicks,
       // During resimulation, emit playerJoined when crossing a player's joinTick
-      // so the game layer can re-add players that were lost during snapshot restore
+      // so the game layer can re-add players that were lost during snapshot restore.
+      // Skip if we've already emitted for this player (prevents duplicate events).
       onPlayerAddDuringResimulation: (playerId, _tick) => {
+        if (this.emittedJoinEvents.has(playerId)) {
+          return;
+        }
         const playerInfo = this.playerManager.getPlayer(playerId);
         if (playerInfo) {
+          this.emittedJoinEvents.add(playerId);
           this.emit("playerJoined", playerInfo);
         }
       },
@@ -2744,6 +3075,16 @@ var Session = class _Session {
         const playerInfo = this.playerManager.getPlayer(playerId);
         if (playerInfo) {
           this.emit("playerLeft", playerInfo);
+        }
+      },
+      // When rollback occurs, clear emittedJoinEvents for players whose joinTick
+      // is after the restore tick, since they need to be re-added during resimulation
+      onRollback: (restoreTick) => {
+        for (const playerId of this.emittedJoinEvents) {
+          const playerInfo = this.playerManager.getPlayer(playerId);
+          if (playerInfo && playerInfo.joinTick !== null && playerInfo.joinTick > restoreTick) {
+            this.emittedJoinEvents.delete(playerId);
+          }
         }
       }
     };
@@ -2950,6 +3291,7 @@ var Session = class _Session {
     this._roomId = null;
     this._isHost = false;
     this.playerManager.clear();
+    this.emittedJoinEvents.clear();
     this.engine.reset();
     this.playerManager.addPlayer({
       id: this.localPlayerId,
@@ -3276,6 +3618,7 @@ var Session = class _Session {
       if (player.role === 0 /* Player */) {
         this.engine.removePlayer(playerId, player.leaveTick);
       }
+      this.emittedJoinEvents.delete(playerId);
       this.emit("playerLeft", player);
       if (this._isHost && this.desyncManager.isHostAuthority) {
         this.broadcast(createPlayerLeft(playerId, player.leaveTick), true);
@@ -3445,16 +3788,24 @@ var Session = class _Session {
     this.engine.setState(message.tick, message.state, message.playerTimeline);
     this.pendingHashMessages = [];
     for (const entry of message.playerTimeline) {
+      const connectionState = entry.leaveTick !== null ? 2 /* Disconnected */ : 1 /* Connected */;
       if (!this.playerManager.hasPlayer(entry.playerId)) {
         this.playerManager.addPlayer({
           id: entry.playerId,
-          connectionState: 1 /* Connected */,
+          connectionState,
           joinTick: entry.joinTick,
           leaveTick: entry.leaveTick,
           isHost: false,
           role: 0 /* Player */
           // Default to player; role info may come from elsewhere
         });
+      } else {
+        const existingPlayer = this.playerManager.getPlayer(entry.playerId);
+        if (existingPlayer) {
+          existingPlayer.connectionState = connectionState;
+          existingPlayer.joinTick = entry.joinTick;
+          existingPlayer.leaveTick = entry.leaveTick;
+        }
       }
     }
     if (this._state === 1 /* Connecting */ || this._state === 2 /* Lobby */) {
@@ -3490,7 +3841,7 @@ var Session = class _Session {
       );
       return;
     }
-    if (this.playerManager.size >= this.config.maxPlayers) {
+    if (this.playerManager.getConnectedPlayers().length >= this.config.maxPlayers) {
       this.sendToPeer(peerId, createJoinReject(playerId, "Room is full"), true);
       return;
     }
@@ -3517,6 +3868,7 @@ var Session = class _Session {
     if (this._state === 3 /* Playing */ && playerInfo.joinTick !== null && playerRole === 0 /* Player */) {
       this.engine.addPlayer(playerId, playerInfo.joinTick);
     }
+    this.emittedJoinEvents.add(playerId);
     this.emit("playerJoined", playerInfo);
     if (this._state === 3 /* Playing */) {
       const state = this.engine.getState();
@@ -3587,6 +3939,7 @@ var Session = class _Session {
     if (message.role === 0 /* Player */) {
       this.engine.addPlayer(message.playerId, message.joinTick);
     }
+    this.emittedJoinEvents.add(message.playerId);
     this.emit("playerJoined", playerInfo);
   }
   /**
@@ -3598,6 +3951,7 @@ var Session = class _Session {
       player.leaveTick = message.leaveTick;
       player.connectionState = 2 /* Disconnected */;
       this.engine.removePlayer(message.playerId, message.leaveTick);
+      this.emittedJoinEvents.delete(message.playerId);
       this.emit("playerLeft", player);
     }
   }
@@ -3884,6 +4238,7 @@ var LocalTransport = class {
   onMessage = null;
   onConnect = null;
   onDisconnect = null;
+  onError = null;
   _connectedPeers = /* @__PURE__ */ new Set();
   linkedTransports = /* @__PURE__ */ new Map();
   pendingMessages = new MessageHeap();
@@ -8446,6 +8801,7 @@ var DotGame = class {
 // demo/demo.ts
 var TICK_RATE = 60;
 var TICK_MS = 1e3 / TICK_RATE;
+var MAX_PLAYERS = 16;
 var DemoManager = class {
   players = /* @__PURE__ */ new Map();
   activePlayerId = null;
@@ -8457,6 +8813,7 @@ var DemoManager = class {
   topology = 1 /* Star */;
   desyncAuthority = 0 /* Host */;
   simulatedLatency = 0;
+  addPlayerBtn = null;
   constructor() {
     this.setupControls();
     this.setupKeyboardInput();
@@ -8468,7 +8825,7 @@ var DemoManager = class {
     const topologySelect = document.getElementById("topology");
     const authoritySelect = document.getElementById("authority");
     const latencySelect = document.getElementById("latency");
-    const addPlayerBtn = document.getElementById("add-player");
+    this.addPlayerBtn = document.getElementById("add-player");
     topologySelect.addEventListener("change", () => {
       this.topology = topologySelect.value === "mesh" ? 0 /* Mesh */ : 1 /* Star */;
       this.reset();
@@ -8481,9 +8838,17 @@ var DemoManager = class {
       this.simulatedLatency = parseInt(latencySelect.value, 10);
       this.reset();
     });
-    addPlayerBtn.addEventListener("click", () => {
+    this.addPlayerBtn.addEventListener("click", () => {
       this.addPlayer();
     });
+  }
+  /**
+   * Update the Add Player button enabled state based on current player count.
+   */
+  updateAddPlayerButton() {
+    if (this.addPlayerBtn) {
+      this.addPlayerBtn.disabled = this.players.size >= MAX_PLAYERS;
+    }
   }
   /**
    * Set up keyboard input handling.
@@ -8510,6 +8875,7 @@ var DemoManager = class {
     this.players.clear();
     this.activePlayerId = null;
     this.playerCounter = 0;
+    this.updateAddPlayerButton();
   }
   /**
    * Get the current input as a byte based on pressed keys.
@@ -8553,7 +8919,8 @@ var DemoManager = class {
         topology: this.topology,
         desyncAuthority: this.desyncAuthority,
         tickRate: TICK_RATE,
-        hashInterval: 30
+        hashInterval: 30,
+        maxPlayers: MAX_PLAYERS
       }
     });
     session.on("playerJoined", (info) => {
@@ -8576,6 +8943,7 @@ var DemoManager = class {
       panel
     };
     this.players.set(playerId, entry);
+    this.updateAddPlayerButton();
     if (isHost) {
       session.createRoom().then(() => {
         game.addPlayer(playerId);
@@ -8631,6 +8999,7 @@ var DemoManager = class {
       }
     }
     this.flushAllTransports();
+    this.updateAddPlayerButton();
   }
   /**
    * Create the UI panel for a player.

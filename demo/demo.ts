@@ -26,6 +26,9 @@ interface PlayerEntry {
 /**
  * Manages the demo, orchestrating multiple local players.
  */
+/** Maximum players allowed in the demo */
+const MAX_PLAYERS = 16;
+
 class DemoManager {
   players: Map<string, PlayerEntry> = new Map();
   activePlayerId: string | null = null;
@@ -38,6 +41,7 @@ class DemoManager {
   private topology: Topology = Topology.Star;
   private desyncAuthority: DesyncAuthority = DesyncAuthority.Host;
   private simulatedLatency: number = 0;
+  private addPlayerBtn: HTMLButtonElement | null = null;
 
   constructor() {
     this.setupControls();
@@ -51,7 +55,7 @@ class DemoManager {
     const topologySelect = document.getElementById("topology") as HTMLSelectElement;
     const authoritySelect = document.getElementById("authority") as HTMLSelectElement;
     const latencySelect = document.getElementById("latency") as HTMLSelectElement;
-    const addPlayerBtn = document.getElementById("add-player") as HTMLButtonElement;
+    this.addPlayerBtn = document.getElementById("add-player") as HTMLButtonElement;
 
     topologySelect.addEventListener("change", () => {
       this.topology = topologySelect.value === "mesh" ? Topology.Mesh : Topology.Star;
@@ -70,9 +74,18 @@ class DemoManager {
       this.reset();
     });
 
-    addPlayerBtn.addEventListener("click", () => {
+    this.addPlayerBtn.addEventListener("click", () => {
       this.addPlayer();
     });
+  }
+
+  /**
+   * Update the Add Player button enabled state based on current player count.
+   */
+  private updateAddPlayerButton(): void {
+    if (this.addPlayerBtn) {
+      this.addPlayerBtn.disabled = this.players.size >= MAX_PLAYERS;
+    }
   }
 
   /**
@@ -103,6 +116,7 @@ class DemoManager {
     this.players.clear();
     this.activePlayerId = null;
     this.playerCounter = 0;
+    this.updateAddPlayerButton();
   }
 
   /**
@@ -158,6 +172,7 @@ class DemoManager {
         desyncAuthority: this.desyncAuthority,
         tickRate: TICK_RATE,
         hashInterval: 30,
+        maxPlayers: MAX_PLAYERS,
       },
     });
 
@@ -189,6 +204,7 @@ class DemoManager {
       panel,
     };
     this.players.set(playerId, entry);
+    this.updateAddPlayerButton();
 
     // Set up room
     if (isHost) {
@@ -264,6 +280,7 @@ class DemoManager {
 
     // Flush to propagate leave messages
     this.flushAllTransports();
+    this.updateAddPlayerButton();
   }
 
   /**

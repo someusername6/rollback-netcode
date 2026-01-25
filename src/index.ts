@@ -82,7 +82,9 @@ export {
 	encodeMessage,
 	decodeMessage,
 	DecodeError,
+	DEFAULT_PROTOCOL_LIMITS,
 } from "./protocol/encoding.js";
+export type { ProtocolLimits } from "./protocol/encoding.js";
 export { MessageType } from "./protocol/messages.js";
 export type { Message } from "./protocol/messages.js";
 

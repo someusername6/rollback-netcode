@@ -9,6 +9,7 @@ import assert from "node:assert";
 import { describe, it } from "node:test";
 import { createSession } from "../../src/session/session.js";
 import { LocalTransport } from "../../src/transport/local.js";
+import { PlayerConnectionState } from "../../src/types.js";
 import type { Game, PlayerId } from "../../src/types.js";
 
 /**
@@ -380,5 +381,271 @@ describe("Mid-game join", () => {
 
     hostSession.destroy();
     guestSession.destroy();
+  });
+
+  it("should allow new player to join after another player disconnects at max capacity", async () => {
+    // This test verifies that when a room is at max capacity and a player
+    // disconnects, a new player can join to take their slot.
+    // This tests the fix for counting only connected players (not disconnected ones)
+    // when checking if the room is full.
+
+    // Setup host with maxPlayers=2
+    const hostGame = new MultiPlayerGame();
+    const hostTransport = new LocalTransport("host");
+    const hostSession = createSession({
+      game: hostGame,
+      transport: hostTransport,
+      config: {
+        maxPlayers: 2,
+      },
+    });
+
+    hostSession.on("playerJoined", (info) => {
+      hostGame.addPlayer(info.id);
+    });
+    hostSession.on("playerLeft", (info) => {
+      hostGame.removePlayer(info.id);
+    });
+
+    await hostSession.createRoom();
+    hostGame.addPlayer("host", 0, 0);
+    hostSession.start();
+
+    // Run a few ticks
+    for (let i = 0; i < 5; i++) {
+      hostSession.tick(new Uint8Array([128, 128]));
+    }
+
+    // Guest1 joins - room is now at capacity (2/2)
+    const guest1Game = new MultiPlayerGame();
+    const guest1Transport = new LocalTransport("guest1");
+    const guest1Session = createSession({
+      game: guest1Game,
+      transport: guest1Transport,
+      config: {
+        maxPlayers: 2,
+      },
+    });
+
+    guest1Session.on("playerJoined", (info) => {
+      guest1Game.addPlayer(info.id);
+    });
+
+    LocalTransport.link(hostTransport, guest1Transport);
+    await guest1Session.joinRoom("room", "host");
+    flushTransports([hostTransport, guest1Transport]);
+
+    // Verify guest1 joined successfully
+    assert.ok(hostGame.players.has("guest1"), "Host should have guest1");
+    assert.strictEqual(
+      hostSession.players.size,
+      2,
+      "Host should see 2 players"
+    );
+
+    // Run a few more ticks
+    for (let i = 0; i < 5; i++) {
+      hostSession.tick(new Uint8Array([128, 128]));
+      guest1Session.tick(new Uint8Array([128, 128]));
+      flushTransports([hostTransport, guest1Transport]);
+    }
+
+    // Guest1 leaves the room
+    guest1Session.leaveRoom();
+    flushTransports([hostTransport, guest1Transport]);
+
+    // Run a few ticks to process the leave
+    for (let i = 0; i < 3; i++) {
+      hostSession.tick(new Uint8Array([128, 128]));
+      flushTransports([hostTransport, guest1Transport]);
+    }
+
+    // Now guest2 tries to join - should succeed since guest1 left
+    const guest2Game = new MultiPlayerGame();
+    const guest2Transport = new LocalTransport("guest2");
+    const guest2Session = createSession({
+      game: guest2Game,
+      transport: guest2Transport,
+      config: {
+        maxPlayers: 2,
+      },
+    });
+
+    guest2Session.on("playerJoined", (info) => {
+      guest2Game.addPlayer(info.id);
+    });
+
+    LocalTransport.link(hostTransport, guest2Transport);
+
+    // This should succeed - the fix ensures disconnected players don't count
+    await guest2Session.joinRoom("room", "host");
+    flushTransports([hostTransport, guest2Transport]);
+
+    // Verify guest2 joined successfully
+    assert.ok(
+      hostGame.players.has("guest2"),
+      "Host should have guest2 after guest1 left"
+    );
+    assert.ok(
+      guest2Game.players.has("host"),
+      "Guest2 should have host after joining"
+    );
+
+    // Guest2's session should be in Playing state
+    assert.strictEqual(
+      guest2Session.state,
+      3, // SessionState.Playing
+      "Guest2 should be in Playing state"
+    );
+
+    // Run a few ticks to confirm everything works
+    for (let i = 0; i < 5; i++) {
+      hostSession.tick(new Uint8Array([128, 128]));
+      guest2Session.tick(new Uint8Array([128, 128]));
+      flushTransports([hostTransport, guest2Transport]);
+    }
+
+    // Final verification - both sessions should have advancing ticks
+    assert.ok(
+      hostSession.currentTick > 0,
+      "Host tick should be advancing"
+    );
+    assert.ok(
+      guest2Session.currentTick > 0,
+      "Guest2 tick should be advancing"
+    );
+
+    // Cleanup
+    hostSession.destroy();
+    guest1Session.destroy();
+    guest2Session.destroy();
+  });
+
+  it("should correctly sync disconnected player state to newly joined players", async () => {
+    // This test verifies that when a player joins after another player has
+    // disconnected, the new player correctly sees the disconnected player
+    // with connectionState=Disconnected, not Connected.
+
+    // Setup host
+    const hostGame = new MultiPlayerGame();
+    const hostTransport = new LocalTransport("host");
+    const hostSession = createSession({
+      game: hostGame,
+      transport: hostTransport,
+    });
+
+    hostSession.on("playerJoined", (info) => {
+      hostGame.addPlayer(info.id);
+    });
+    hostSession.on("playerLeft", (info) => {
+      hostGame.removePlayer(info.id);
+    });
+
+    await hostSession.createRoom();
+    hostGame.addPlayer("host", 0, 0);
+    hostSession.start();
+
+    // Run a few ticks
+    for (let i = 0; i < 5; i++) {
+      hostSession.tick(new Uint8Array([128, 128]));
+    }
+
+    // Guest1 joins
+    const guest1Game = new MultiPlayerGame();
+    const guest1Transport = new LocalTransport("guest1");
+    const guest1Session = createSession({
+      game: guest1Game,
+      transport: guest1Transport,
+    });
+
+    guest1Session.on("playerJoined", (info) => {
+      guest1Game.addPlayer(info.id);
+    });
+
+    LocalTransport.link(hostTransport, guest1Transport);
+    await guest1Session.joinRoom("room", "host");
+    flushTransports([hostTransport, guest1Transport]);
+
+    // Verify guest1 joined successfully
+    assert.ok(hostGame.players.has("guest1"), "Host should have guest1");
+
+    // Run a few more ticks
+    for (let i = 0; i < 5; i++) {
+      hostSession.tick(new Uint8Array([128, 128]));
+      guest1Session.tick(new Uint8Array([128, 128]));
+      flushTransports([hostTransport, guest1Transport]);
+    }
+
+    // Guest1 leaves the room
+    guest1Session.leaveRoom();
+    flushTransports([hostTransport, guest1Transport]);
+
+    // Run a few ticks to process the leave
+    for (let i = 0; i < 3; i++) {
+      hostSession.tick(new Uint8Array([128, 128]));
+      flushTransports([hostTransport, guest1Transport]);
+    }
+
+    // Verify guest1 is disconnected on host
+    const guest1OnHost = hostSession.players.get("guest1" as PlayerId);
+    assert.ok(guest1OnHost, "Host should still have guest1 in player list");
+    assert.strictEqual(
+      guest1OnHost?.connectionState,
+      PlayerConnectionState.Disconnected,
+      "Guest1 should be marked as Disconnected on host"
+    );
+
+    // Now guest2 joins - they should receive the player timeline via StateSync
+    // and correctly see guest1 as disconnected
+    const guest2Game = new MultiPlayerGame();
+    const guest2Transport = new LocalTransport("guest2");
+    const guest2Session = createSession({
+      game: guest2Game,
+      transport: guest2Transport,
+    });
+
+    guest2Session.on("playerJoined", (info) => {
+      guest2Game.addPlayer(info.id);
+    });
+
+    LocalTransport.link(hostTransport, guest2Transport);
+    await guest2Session.joinRoom("room", "host");
+    flushTransports([hostTransport, guest2Transport]);
+
+    // Verify guest2 joined successfully
+    assert.ok(
+      guest2Game.players.has("host"),
+      "Guest2 should have host after joining"
+    );
+
+    // The critical check: guest2 should see guest1 as DISCONNECTED, not Connected
+    const guest1OnGuest2 = guest2Session.players.get("guest1" as PlayerId);
+    assert.ok(
+      guest1OnGuest2,
+      "Guest2 should have guest1 in player list (from timeline)"
+    );
+    assert.strictEqual(
+      guest1OnGuest2?.connectionState,
+      PlayerConnectionState.Disconnected,
+      "Guest2 should see guest1 as Disconnected (not Connected)"
+    );
+    assert.ok(
+      guest1OnGuest2?.leaveTick !== null,
+      "Guest1's leaveTick should be set on guest2's view"
+    );
+
+    // Also verify connected players are still seen as connected
+    const hostOnGuest2 = guest2Session.players.get("host" as PlayerId);
+    assert.ok(hostOnGuest2, "Guest2 should have host in player list");
+    assert.strictEqual(
+      hostOnGuest2?.connectionState,
+      PlayerConnectionState.Connected,
+      "Host should be seen as Connected by guest2"
+    );
+
+    // Cleanup
+    hostSession.destroy();
+    guest1Session.destroy();
+    guest2Session.destroy();
   });
 });
