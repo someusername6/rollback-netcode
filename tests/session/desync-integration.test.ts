@@ -4,7 +4,13 @@ import {
 	type LocalTransport,
 	createLocalTransportGroup,
 } from "../../src/transport/local.js";
-import { type Game, type PlayerId, type Tick } from "../../src/types.js";
+import {
+	DesyncAuthority,
+	type Game,
+	type PlayerId,
+	type Tick,
+	Topology,
+} from "../../src/types.js";
 import { createSession } from "../../src/session/session.js";
 
 /**
@@ -633,6 +639,337 @@ describe("Desync Detection Integration", () => {
 			for (const tick of desyncTicks) {
 				assert.ok(tick >= 0, `Tick should be non-negative, got ${tick}`);
 			}
+		});
+	});
+
+	describe("topology and authority combinations", () => {
+		it("should detect desync with Star topology + Peer authority", async () => {
+			const transports = createLocalTransportGroup(["host", "client"]);
+			const hostTransport = getTransport(transports, "host");
+			const clientTransport = getTransport(transports, "client");
+
+			const hostGame = new TestGame();
+			const clientGame = new TestGame();
+
+			// Explicitly set Star + Peer (the default, but being explicit)
+			const config = {
+				topology: Topology.Star,
+				desyncAuthority: DesyncAuthority.Peer,
+				hashInterval: 5,
+				inputDelayTicks: 0,
+			};
+
+			const hostSession = createSession({
+				game: hostGame,
+				transport: hostTransport,
+				config,
+			});
+			const clientSession = createSession({
+				game: clientGame,
+				transport: clientTransport,
+				config,
+			});
+
+			// Track desync events on both sides
+			const hostDesyncs: Array<{ tick: Tick; localHash: number; remoteHash: number }> = [];
+			const clientDesyncs: Array<{ tick: Tick; localHash: number; remoteHash: number }> = [];
+
+			hostSession.on("desync", (tick, localHash, remoteHash) => {
+				hostDesyncs.push({ tick, localHash, remoteHash });
+			});
+			clientSession.on("desync", (tick, localHash, remoteHash) => {
+				clientDesyncs.push({ tick, localHash, remoteHash });
+			});
+
+			// Set up session
+			await hostSession.createRoom();
+			await clientSession.joinRoom(hostSession.roomId!, "host");
+			flushAll(hostTransport, clientTransport);
+
+			hostSession.start();
+			flushAll(hostTransport, clientTransport);
+
+			// Run some ticks in sync
+			runTicks(
+				[
+					{ session: hostSession, input: NEUTRAL_INPUT },
+					{ session: clientSession, input: NEUTRAL_INPUT },
+				],
+				[hostTransport, clientTransport],
+				10,
+			);
+
+			// Enable desync on client
+			clientGame.enableDesync(100);
+
+			// Run more ticks to trigger detection
+			runTicks(
+				[
+					{ session: hostSession, input: NEUTRAL_INPUT },
+					{ session: clientSession, input: NEUTRAL_INPUT },
+				],
+				[hostTransport, clientTransport],
+				20,
+			);
+
+			// In peer mode, both sides should detect the desync
+			const totalDesyncs = hostDesyncs.length + clientDesyncs.length;
+			assert.ok(
+				totalDesyncs > 0,
+				`Star+Peer: Should detect desync, got host=${hostDesyncs.length} client=${clientDesyncs.length}`,
+			);
+
+			// Verify hash values differ
+			if (hostDesyncs.length > 0) {
+				const d = hostDesyncs[0]!;
+				assert.notStrictEqual(d.localHash, d.remoteHash, "Host should see differing hashes");
+			}
+			if (clientDesyncs.length > 0) {
+				const d = clientDesyncs[0]!;
+				assert.notStrictEqual(d.localHash, d.remoteHash, "Client should see differing hashes");
+			}
+		});
+
+		it("should detect desync with Mesh topology + Host authority", async () => {
+			const transports = createLocalTransportGroup(["host", "client"]);
+			const hostTransport = getTransport(transports, "host");
+			const clientTransport = getTransport(transports, "client");
+
+			const hostGame = new TestGame();
+			const clientGame = new TestGame();
+
+			// Mesh + Host authority: host collects and compares all hashes
+			const config = {
+				topology: Topology.Mesh,
+				desyncAuthority: DesyncAuthority.Host,
+				hashInterval: 5,
+				inputDelayTicks: 0,
+			};
+
+			const hostSession = createSession({
+				game: hostGame,
+				transport: hostTransport,
+				config,
+			});
+			const clientSession = createSession({
+				game: clientGame,
+				transport: clientTransport,
+				config,
+			});
+
+			// Track desync events - in host authority mode, only host detects
+			const hostDesyncs: Array<{ tick: Tick; localHash: number; remoteHash: number }> = [];
+			const clientDesyncs: Array<{ tick: Tick; localHash: number; remoteHash: number }> = [];
+
+			hostSession.on("desync", (tick, localHash, remoteHash) => {
+				hostDesyncs.push({ tick, localHash, remoteHash });
+			});
+			clientSession.on("desync", (tick, localHash, remoteHash) => {
+				clientDesyncs.push({ tick, localHash, remoteHash });
+			});
+
+			// Set up session
+			await hostSession.createRoom();
+			await clientSession.joinRoom(hostSession.roomId!, "host");
+			flushAll(hostTransport, clientTransport);
+
+			hostSession.start();
+			flushAll(hostTransport, clientTransport);
+
+			// Run some ticks in sync
+			runTicks(
+				[
+					{ session: hostSession, input: NEUTRAL_INPUT },
+					{ session: clientSession, input: NEUTRAL_INPUT },
+				],
+				[hostTransport, clientTransport],
+				10,
+			);
+
+			// Enable desync on client
+			clientGame.enableDesync(100);
+
+			// Run more ticks to trigger detection
+			runTicks(
+				[
+					{ session: hostSession, input: NEUTRAL_INPUT },
+					{ session: clientSession, input: NEUTRAL_INPUT },
+				],
+				[hostTransport, clientTransport],
+				20,
+			);
+
+			// In host authority mode, only the HOST should detect the desync
+			assert.ok(
+				hostDesyncs.length > 0,
+				`Mesh+Host: Host should detect desync, got ${hostDesyncs.length}`,
+			);
+
+			// Client should NOT detect desync in host authority mode
+			// (client sends hash to host, host compares)
+			assert.strictEqual(
+				clientDesyncs.length,
+				0,
+				`Mesh+Host: Client should not detect desync (host authority), got ${clientDesyncs.length}`,
+			);
+
+			// Verify host saw differing hashes
+			const d = hostDesyncs[0]!;
+			assert.notStrictEqual(d.localHash, d.remoteHash, "Host should see differing hashes");
+		});
+
+		it("should detect desync with Mesh topology + Peer authority", async () => {
+			const transports = createLocalTransportGroup(["host", "client"]);
+			const hostTransport = getTransport(transports, "host");
+			const clientTransport = getTransport(transports, "client");
+
+			const hostGame = new TestGame();
+			const clientGame = new TestGame();
+
+			// Mesh + Peer authority: each peer compares independently
+			const config = {
+				topology: Topology.Mesh,
+				desyncAuthority: DesyncAuthority.Peer,
+				hashInterval: 5,
+				inputDelayTicks: 0,
+			};
+
+			const hostSession = createSession({
+				game: hostGame,
+				transport: hostTransport,
+				config,
+			});
+			const clientSession = createSession({
+				game: clientGame,
+				transport: clientTransport,
+				config,
+			});
+
+			const hostDesyncs: Array<{ tick: Tick; localHash: number; remoteHash: number }> = [];
+			const clientDesyncs: Array<{ tick: Tick; localHash: number; remoteHash: number }> = [];
+
+			hostSession.on("desync", (tick, localHash, remoteHash) => {
+				hostDesyncs.push({ tick, localHash, remoteHash });
+			});
+			clientSession.on("desync", (tick, localHash, remoteHash) => {
+				clientDesyncs.push({ tick, localHash, remoteHash });
+			});
+
+			// Set up session
+			await hostSession.createRoom();
+			await clientSession.joinRoom(hostSession.roomId!, "host");
+			flushAll(hostTransport, clientTransport);
+
+			hostSession.start();
+			flushAll(hostTransport, clientTransport);
+
+			// Run some ticks in sync
+			runTicks(
+				[
+					{ session: hostSession, input: NEUTRAL_INPUT },
+					{ session: clientSession, input: NEUTRAL_INPUT },
+				],
+				[hostTransport, clientTransport],
+				10,
+			);
+
+			// Enable desync on client
+			clientGame.enableDesync(100);
+
+			// Run more ticks to trigger detection
+			runTicks(
+				[
+					{ session: hostSession, input: NEUTRAL_INPUT },
+					{ session: clientSession, input: NEUTRAL_INPUT },
+				],
+				[hostTransport, clientTransport],
+				20,
+			);
+
+			// In peer mode, both sides should detect the desync
+			const totalDesyncs = hostDesyncs.length + clientDesyncs.length;
+			assert.ok(
+				totalDesyncs > 0,
+				`Mesh+Peer: Should detect desync, got host=${hostDesyncs.length} client=${clientDesyncs.length}`,
+			);
+		});
+
+		it("should detect desync with Star topology + Host authority", async () => {
+			const transports = createLocalTransportGroup(["host", "client"]);
+			const hostTransport = getTransport(transports, "host");
+			const clientTransport = getTransport(transports, "client");
+
+			const hostGame = new TestGame();
+			const clientGame = new TestGame();
+
+			// Star + Host authority: this is an unusual combo
+			// isHostAuthority only returns true for Mesh+Host, so this uses peer mode
+			const config = {
+				topology: Topology.Star,
+				desyncAuthority: DesyncAuthority.Host,
+				hashInterval: 5,
+				inputDelayTicks: 0,
+			};
+
+			const hostSession = createSession({
+				game: hostGame,
+				transport: hostTransport,
+				config,
+			});
+			const clientSession = createSession({
+				game: clientGame,
+				transport: clientTransport,
+				config,
+			});
+
+			const hostDesyncs: Array<{ tick: Tick; localHash: number; remoteHash: number }> = [];
+			const clientDesyncs: Array<{ tick: Tick; localHash: number; remoteHash: number }> = [];
+
+			hostSession.on("desync", (tick, localHash, remoteHash) => {
+				hostDesyncs.push({ tick, localHash, remoteHash });
+			});
+			clientSession.on("desync", (tick, localHash, remoteHash) => {
+				clientDesyncs.push({ tick, localHash, remoteHash });
+			});
+
+			// Set up session
+			await hostSession.createRoom();
+			await clientSession.joinRoom(hostSession.roomId!, "host");
+			flushAll(hostTransport, clientTransport);
+
+			hostSession.start();
+			flushAll(hostTransport, clientTransport);
+
+			// Run some ticks in sync
+			runTicks(
+				[
+					{ session: hostSession, input: NEUTRAL_INPUT },
+					{ session: clientSession, input: NEUTRAL_INPUT },
+				],
+				[hostTransport, clientTransport],
+				10,
+			);
+
+			// Enable desync on client
+			clientGame.enableDesync(100);
+
+			// Run more ticks to trigger detection
+			runTicks(
+				[
+					{ session: hostSession, input: NEUTRAL_INPUT },
+					{ session: clientSession, input: NEUTRAL_INPUT },
+				],
+				[hostTransport, clientTransport],
+				20,
+			);
+
+			// Star+Host falls back to peer mode (isHostAuthority requires Mesh)
+			// So both sides should detect
+			const totalDesyncs = hostDesyncs.length + clientDesyncs.length;
+			assert.ok(
+				totalDesyncs > 0,
+				`Star+Host: Should detect desync, got host=${hostDesyncs.length} client=${clientDesyncs.length}`,
+			);
 		});
 	});
 });
