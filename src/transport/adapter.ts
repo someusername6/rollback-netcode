@@ -106,4 +106,10 @@ export interface TransportAdapter {
 	 * @returns Connection metrics or null if not available
 	 */
 	getConnectionMetrics?(peerId: string): ConnectionMetrics | null;
+
+	/**
+	 * Clean up resources when the transport is no longer needed.
+	 * Optional - implement if your transport has resources that need cleanup.
+	 */
+	dispose?(): void;
 }

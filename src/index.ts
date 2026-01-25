@@ -69,6 +69,7 @@ export { WebRTCTransport } from "./transport/webrtc.js";
 export type {
 	WebRTCTransportConfig,
 	SignalingCallbacks,
+	SignalMessage,
 } from "./transport/webrtc.js";
 export {
 	TransformingTransport,
@@ -111,7 +112,10 @@ export {
 	PlayerConnectionState,
 	asPlayerId,
 	asTick,
+	validatePlayerId,
+	validateTick,
 	playerIdToPeerId,
+	TICK_MIN,
 	DEFAULT_SESSION_CONFIG,
 	DEFAULT_INPUT_PREDICTOR,
 	MAX_PLAYERS_LIMIT,

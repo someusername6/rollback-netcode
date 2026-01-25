@@ -12,6 +12,11 @@
 export type Tick = number & { readonly __brand: "Tick" };
 
 /**
+ * Minimum valid tick value (-1 represents initial state before tick 0).
+ */
+export const TICK_MIN = -1;
+
+/**
  * A unique player identifier.
  *
  * Note: In the current implementation, PlayerId and PeerId (transport layer identifier)
@@ -23,16 +28,50 @@ export type PlayerId = string & { readonly __brand: "PlayerId" };
 
 /**
  * Helper to create a Tick value.
+ * This is a simple cast - use validateTick() for validation.
+ *
+ * @param n - The tick number
  */
 export function asTick(n: number): Tick {
 	return n as Tick;
 }
 
 /**
+ * Validate that a number is a valid tick value.
+ *
+ * @param n - The number to validate
+ * @throws Error if the value is not a valid tick (must be integer >= -1)
+ */
+export function validateTick(n: number): void {
+	if (!Number.isInteger(n) || n < TICK_MIN) {
+		throw new Error(
+			`Invalid tick: ${n}. Tick must be an integer >= ${TICK_MIN}`,
+		);
+	}
+}
+
+/**
  * Helper to create a PlayerId value.
+ * This is a simple cast - use validatePlayerId() for validation.
+ *
+ * @param s - The player ID string
  */
 export function asPlayerId(s: string): PlayerId {
 	return s as PlayerId;
+}
+
+/**
+ * Validate that a string is a valid player ID.
+ *
+ * @param s - The string to validate
+ * @throws Error if the value is not a valid player ID (must be non-empty string)
+ */
+export function validatePlayerId(s: string): void {
+	if (typeof s !== "string" || s.length === 0) {
+		throw new Error(
+			`Invalid player ID: "${s}". Player ID must be a non-empty string`,
+		);
+	}
 }
 
 /**

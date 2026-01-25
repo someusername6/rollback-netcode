@@ -2,11 +2,14 @@ import assert from "node:assert";
 import { describe, it } from "node:test";
 import {
 	DesyncAuthority,
+	TICK_MIN,
 	Topology,
 	ValidationError,
 	asPlayerId,
 	asTick,
+	validatePlayerId,
 	validateSessionConfig,
+	validateTick,
 } from "../src/types.js";
 
 describe("types", () => {
@@ -41,6 +44,90 @@ describe("types", () => {
 		it("should work with special characters", () => {
 			const id = asPlayerId("player:123@test.com");
 			assert.strictEqual(id, "player:123@test.com");
+		});
+	});
+
+	describe("TICK_MIN", () => {
+		it("should be -1", () => {
+			assert.strictEqual(TICK_MIN, -1);
+		});
+	});
+
+	describe("validateTick", () => {
+		it("should accept valid tick values", () => {
+			assert.doesNotThrow(() => validateTick(0));
+			assert.doesNotThrow(() => validateTick(1));
+			assert.doesNotThrow(() => validateTick(100));
+			assert.doesNotThrow(() => validateTick(1000000));
+		});
+
+		it("should accept TICK_MIN (-1)", () => {
+			assert.doesNotThrow(() => validateTick(-1));
+			assert.doesNotThrow(() => validateTick(TICK_MIN));
+		});
+
+		it("should throw for negative ticks below TICK_MIN", () => {
+			assert.throws(
+				() => validateTick(-2),
+				/Invalid tick: -2/,
+			);
+			assert.throws(
+				() => validateTick(-100),
+				/Invalid tick/,
+			);
+		});
+
+		it("should throw for non-integer values", () => {
+			assert.throws(
+				() => validateTick(1.5),
+				/Invalid tick: 1.5/,
+			);
+			assert.throws(
+				() => validateTick(0.1),
+				/Invalid tick/,
+			);
+		});
+
+		it("should throw for NaN", () => {
+			assert.throws(
+				() => validateTick(NaN),
+				/Invalid tick/,
+			);
+		});
+
+		it("should throw for Infinity", () => {
+			assert.throws(
+				() => validateTick(Infinity),
+				/Invalid tick/,
+			);
+			assert.throws(
+				() => validateTick(-Infinity),
+				/Invalid tick/,
+			);
+		});
+	});
+
+	describe("validatePlayerId", () => {
+		it("should accept valid player IDs", () => {
+			assert.doesNotThrow(() => validatePlayerId("player-1"));
+			assert.doesNotThrow(() => validatePlayerId("a"));
+			assert.doesNotThrow(() => validatePlayerId("player:123@test.com"));
+		});
+
+		it("should throw for empty string", () => {
+			assert.throws(
+				() => validatePlayerId(""),
+				/Invalid player ID: ""/,
+			);
+		});
+
+		it("should throw with descriptive message", () => {
+			try {
+				validatePlayerId("");
+			} catch (e) {
+				assert.ok(e instanceof Error);
+				assert.ok(e.message.includes("must be a non-empty string"));
+			}
 		});
 	});
 

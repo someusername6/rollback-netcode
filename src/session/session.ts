@@ -29,6 +29,7 @@ import {
 	asPlayerId,
 	asTick,
 	playerIdToPeerId,
+	validatePlayerId,
 	validateSessionConfig,
 } from "../types.js";
 
@@ -176,6 +177,9 @@ export class Session {
 		this._localPlayerId =
 			options.localPlayerId ?? asPlayerId(this.transport.localPeerId);
 
+		// Validate local player ID
+		validatePlayerId(this._localPlayerId);
+
 		// Create topology strategy
 		this.topologyStrategy = createTopologyStrategy(this.config.topology);
 
@@ -235,7 +239,7 @@ export class Session {
 			onRollback: (restoreTick) => {
 				for (const playerId of this.emittedJoinEvents) {
 					const playerInfo = this.playerManager.getPlayer(playerId);
-					if (playerInfo?.joinTick !== null && playerInfo.joinTick > restoreTick) {
+					if (playerInfo && playerInfo.joinTick !== null && playerInfo.joinTick > restoreTick) {
 						this.emittedJoinEvents.delete(playerId);
 					}
 				}

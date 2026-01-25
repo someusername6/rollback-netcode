@@ -67,18 +67,45 @@ export interface WebRTCTransportConfig {
 }
 
 /**
+ * A signaling message to be sent to a remote peer.
+ * This is a discriminated union - check the `type` field to determine the payload.
+ */
+export type SignalMessage =
+	| { type: "description"; description: RTCSessionDescriptionInit }
+	| { type: "candidate"; candidate: RTCIceCandidateInit };
+
+/**
  * Callbacks for signaling integration.
- * You must implement these to handle SDP and ICE candidate exchange.
+ * You must implement this to handle WebRTC signaling exchange.
+ *
+ * The unified `onSignal` callback receives all signaling messages (SDP and ICE),
+ * making it easier to route through a single signaling path.
  */
 export interface SignalingCallbacks {
-	/** Called when a local SDP description is ready to be sent to a peer */
-	onLocalDescription: (
-		peerId: string,
-		description: RTCSessionDescriptionInit,
-	) => void;
-
-	/** Called when a local ICE candidate is ready to be sent to a peer */
-	onLocalCandidate: (peerId: string, candidate: RTCIceCandidateInit) => void;
+	/**
+	 * Called when a signaling message needs to be sent to a peer.
+	 * The message should be serialized and sent through your signaling server.
+	 *
+	 * @param peerId - The target peer's ID
+	 * @param signal - The signal message (either a description or candidate)
+	 *
+	 * @example
+	 * ```typescript
+	 * transport.setSignalingCallbacks({
+	 *   onSignal: (peerId, signal) => {
+	 *     websocket.send(JSON.stringify({ to: peerId, signal }));
+	 *   }
+	 * });
+	 *
+	 * // On the receiving side, parse and call:
+	 * if (signal.type === 'description') {
+	 *   transport.handleRemoteDescription(fromPeerId, signal.description);
+	 * } else {
+	 *   transport.handleRemoteCandidate(fromPeerId, signal.candidate);
+	 * }
+	 * ```
+	 */
+	onSignal: (peerId: string, signal: SignalMessage) => void;
 }
 
 /**
@@ -336,7 +363,10 @@ export class WebRTCTransport implements TransportAdapter {
 		await peer.connection.setLocalDescription(offer);
 
 		// Send offer through signaling
-		this.signalingCallbacks.onLocalDescription(peerId, offer);
+		this.signalingCallbacks.onSignal(peerId, {
+			type: "description",
+			description: offer,
+		});
 	}
 
 	/**
@@ -363,7 +393,10 @@ export class WebRTCTransport implements TransportAdapter {
 			const answer = await peer.connection.createAnswer();
 			await peer.connection.setLocalDescription(answer);
 
-			this.signalingCallbacks.onLocalDescription(peerId, answer);
+			this.signalingCallbacks.onSignal(peerId, {
+				type: "description",
+				description: answer,
+			});
 		}
 	}
 
@@ -524,7 +557,10 @@ export class WebRTCTransport implements TransportAdapter {
 		// Handle ICE candidates
 		connection.onicecandidate = (event) => {
 			if (event.candidate && this.signalingCallbacks) {
-				this.signalingCallbacks.onLocalCandidate(peerId, event.candidate);
+				this.signalingCallbacks.onSignal(peerId, {
+					type: "candidate",
+					candidate: event.candidate,
+				});
 			}
 		};
 

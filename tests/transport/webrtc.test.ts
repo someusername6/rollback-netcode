@@ -157,8 +157,7 @@ describe("WebRTCTransport", () => {
 		it("should clean up pending pings on disconnect", async () => {
 			const transport = new WebRTCTransport("local", { keepaliveInterval: 0 });
 			transport.setSignalingCallbacks({
-				onLocalDescription: () => {},
-				onLocalCandidate: () => {},
+				onSignal: () => {},
 			});
 
 			const peerId = "peer1";
@@ -196,8 +195,7 @@ describe("WebRTCTransport", () => {
 				connectionTimeout: 50, // 50ms timeout for testing
 			});
 			transport.setSignalingCallbacks({
-				onLocalDescription: () => {},
-				onLocalCandidate: () => {},
+				onSignal: () => {},
 			});
 
 			// The connection never completes (no channels open)
@@ -217,8 +215,7 @@ describe("WebRTCTransport", () => {
 				connectionTimeout: 1000, // 1 second timeout
 			});
 			transport.setSignalingCallbacks({
-				onLocalDescription: () => {},
-				onLocalCandidate: () => {},
+				onSignal: () => {},
 			});
 
 			// Start connection
@@ -238,8 +235,7 @@ describe("WebRTCTransport", () => {
 		it("should clean up all resources on destroy", async () => {
 			const transport = new WebRTCTransport("local", { keepaliveInterval: 0 });
 			transport.setSignalingCallbacks({
-				onLocalDescription: () => {},
-				onLocalCandidate: () => {},
+				onSignal: () => {},
 			});
 
 			// Create some connections (but don't await - they won't complete without simulation)
@@ -265,8 +261,7 @@ describe("WebRTCTransport", () => {
 		it("should not fire disconnect callback after destroy with pending disconnect timer", async () => {
 			const transport = new WebRTCTransport("local", { keepaliveInterval: 0 });
 			transport.setSignalingCallbacks({
-				onLocalDescription: () => {},
-				onLocalCandidate: () => {},
+				onSignal: () => {},
 			});
 
 			let disconnectCalledAfterDestroy = false;
@@ -315,20 +310,19 @@ describe("WebRTCTransport", () => {
 				reconnectDelay: 50, // Fast reconnection for testing
 			});
 			transport.setSignalingCallbacks({
-				onLocalDescription: () => {},
-				onLocalCandidate: () => {},
+				onSignal: () => {},
 			});
 
 			let reconnectAttempts = 0;
-			const originalOnLocalDescription = transport["signalingCallbacks"]?.onLocalDescription;
 
 			// Track reconnection attempts through offer creation
 			transport.setSignalingCallbacks({
-				onLocalDescription: (peerId, desc) => {
-					reconnectAttempts++;
-					originalOnLocalDescription?.(peerId, desc);
+				onSignal: (_peerId, signal) => {
+					// Count description signals (offers/answers) as connection attempts
+					if (signal.type === "description") {
+						reconnectAttempts++;
+					}
 				},
-				onLocalCandidate: () => {},
 			});
 
 			// Start connection
@@ -372,8 +366,7 @@ describe("WebRTCTransport", () => {
 		it("should handle send errors gracefully without throwing", async () => {
 			const transport = new WebRTCTransport("local", { keepaliveInterval: 0 });
 			transport.setSignalingCallbacks({
-				onLocalDescription: () => {},
-				onLocalCandidate: () => {},
+				onSignal: () => {},
 			});
 
 			// Sending to non-existent peer should not throw
@@ -387,8 +380,7 @@ describe("WebRTCTransport", () => {
 		it("should handle ICE candidate errors gracefully", async () => {
 			const transport = new WebRTCTransport("local", { keepaliveInterval: 0 });
 			transport.setSignalingCallbacks({
-				onLocalDescription: () => {},
-				onLocalCandidate: () => {},
+				onSignal: () => {},
 			});
 
 			// Adding ICE candidate for non-existent peer should not throw
@@ -406,8 +398,7 @@ describe("WebRTCTransport", () => {
 		it("should notify via onDisconnect when connection fails", async () => {
 			const transport = new WebRTCTransport("local", { keepaliveInterval: 0 });
 			transport.setSignalingCallbacks({
-				onLocalDescription: () => {},
-				onLocalCandidate: () => {},
+				onSignal: () => {},
 			});
 
 			// The disconnect callback is the proper way to handle connection failures
@@ -453,8 +444,7 @@ describe("WebRTCTransport", () => {
 
 			const transport = new WebRTCTransport("local", { keepaliveInterval: 0 });
 			transport.setSignalingCallbacks({
-				onLocalDescription: () => {},
-				onLocalCandidate: () => {},
+				onSignal: () => {},
 			});
 
 			const errors: Array<{ peerId: string | null; error: Error; context: string }> = [];
@@ -490,8 +480,7 @@ describe("WebRTCTransport", () => {
 		it("should call onError when send fails", async () => {
 			const transport = new WebRTCTransport("local", { keepaliveInterval: 0 });
 			transport.setSignalingCallbacks({
-				onLocalDescription: () => {},
-				onLocalCandidate: () => {},
+				onSignal: () => {},
 			});
 
 			const errors: Array<{ peerId: string | null; error: Error; context: string }> = [];
@@ -538,8 +527,7 @@ describe("WebRTCTransport", () => {
 		it("should call onError when data channel error event fires", async () => {
 			const transport = new WebRTCTransport("local", { keepaliveInterval: 0 });
 			transport.setSignalingCallbacks({
-				onLocalDescription: () => {},
-				onLocalCandidate: () => {},
+				onSignal: () => {},
 			});
 
 			const errors: Array<{ peerId: string | null; error: Error; context: string }> = [];
