@@ -315,6 +315,78 @@ describe("Message Encoding/Decoding", () => {
 				assert.strictEqual(decoded.reason, "Room is full");
 			}
 		});
+
+		it("should encode buffer with correct size", () => {
+			const playerId = "test-player";
+			const reason = "Game already started";
+			const original = {
+				type: MessageType.JoinReject as const,
+				playerId: asPlayerId(playerId),
+				reason,
+			};
+
+			const encoded = encodeMessage(original);
+
+			// Expected size: type(1) + playerIdLen(2) + playerId + reasonLen(2) + reason
+			const expectedSize = 1 + 2 + playerId.length + 2 + reason.length;
+			assert.strictEqual(
+				encoded.length,
+				expectedSize,
+				`Buffer should be exactly ${expectedSize} bytes`,
+			);
+		});
+
+		it("should handle long player ID and reason", () => {
+			const playerId = "very-long-player-id-that-exceeds-typical-length";
+			const reason =
+				"This is a very detailed rejection reason that explains exactly why the player was not allowed to join the game session";
+			const original = {
+				type: MessageType.JoinReject as const,
+				playerId: asPlayerId(playerId),
+				reason,
+			};
+
+			const encoded = encodeMessage(original);
+			const decoded = decodeMessage(encoded);
+
+			assert.strictEqual(decoded.type, MessageType.JoinReject);
+			if (decoded.type === MessageType.JoinReject) {
+				assert.strictEqual(decoded.playerId, playerId);
+				assert.strictEqual(decoded.reason, reason);
+			}
+		});
+
+		it("should handle empty reason", () => {
+			const original = {
+				type: MessageType.JoinReject as const,
+				playerId: asPlayerId("player"),
+				reason: "",
+			};
+
+			const encoded = encodeMessage(original);
+			const decoded = decodeMessage(encoded);
+
+			assert.strictEqual(decoded.type, MessageType.JoinReject);
+			if (decoded.type === MessageType.JoinReject) {
+				assert.strictEqual(decoded.reason, "");
+			}
+		});
+
+		it("should handle unicode in reason", () => {
+			const original = {
+				type: MessageType.JoinReject as const,
+				playerId: asPlayerId("player"),
+				reason: "部屋がいっぱいです",
+			};
+
+			const encoded = encodeMessage(original);
+			const decoded = decodeMessage(encoded);
+
+			assert.strictEqual(decoded.type, MessageType.JoinReject);
+			if (decoded.type === MessageType.JoinReject) {
+				assert.strictEqual(decoded.reason, "部屋がいっぱいです");
+			}
+		});
 	});
 
 	describe("StateSyncMessage", () => {
@@ -469,6 +541,55 @@ describe("Message Encoding/Decoding", () => {
 				assert.strictEqual(decoded.disconnectedPeerId, "disconnected-player");
 			}
 		});
+
+		it("should encode buffer with correct size", () => {
+			const peerId = "peer-123";
+			const original = {
+				type: MessageType.DisconnectReport as const,
+				disconnectedPeerId: asPlayerId(peerId),
+			};
+
+			const encoded = encodeMessage(original);
+
+			// Expected size: type(1) + peerIdLen(2) + peerId
+			const expectedSize = 1 + 2 + peerId.length;
+			assert.strictEqual(
+				encoded.length,
+				expectedSize,
+				`Buffer should be exactly ${expectedSize} bytes`,
+			);
+		});
+
+		it("should handle long peer ID", () => {
+			const peerId = "very-long-peer-identifier-that-might-be-a-uuid-or-similar-format-12345";
+			const original = {
+				type: MessageType.DisconnectReport as const,
+				disconnectedPeerId: asPlayerId(peerId),
+			};
+
+			const encoded = encodeMessage(original);
+			const decoded = decodeMessage(encoded);
+
+			assert.strictEqual(decoded.type, MessageType.DisconnectReport);
+			if (decoded.type === MessageType.DisconnectReport) {
+				assert.strictEqual(decoded.disconnectedPeerId, peerId);
+			}
+		});
+
+		it("should handle short peer ID", () => {
+			const original = {
+				type: MessageType.DisconnectReport as const,
+				disconnectedPeerId: asPlayerId("p1"),
+			};
+
+			const encoded = encodeMessage(original);
+			const decoded = decodeMessage(encoded);
+
+			assert.strictEqual(decoded.type, MessageType.DisconnectReport);
+			if (decoded.type === MessageType.DisconnectReport) {
+				assert.strictEqual(decoded.disconnectedPeerId, "p1");
+			}
+		});
 	});
 
 	describe("ResumeCountdownMessage", () => {
@@ -519,6 +640,101 @@ describe("Message Encoding/Decoding", () => {
 			if (decoded.type === MessageType.DropPlayer) {
 				assert.strictEqual(decoded.playerId, "dropped-player");
 				assert.deepStrictEqual(decoded.metadata, original.metadata);
+			}
+		});
+
+		it("should encode buffer with correct size without metadata", () => {
+			const playerId = "player-to-drop";
+			const original = {
+				type: MessageType.DropPlayer as const,
+				playerId: asPlayerId(playerId),
+			};
+
+			const encoded = encodeMessage(original);
+
+			// Expected size: type(1) + playerIdLen(2) + playerId + hasMetadata(1)
+			const expectedSize = 1 + 2 + playerId.length + 1;
+			assert.strictEqual(
+				encoded.length,
+				expectedSize,
+				`Buffer should be exactly ${expectedSize} bytes`,
+			);
+		});
+
+		it("should encode buffer with correct size with metadata", () => {
+			const playerId = "player-to-drop";
+			const metadata = new Uint8Array([10, 20, 30, 40, 50]);
+			const original = {
+				type: MessageType.DropPlayer as const,
+				playerId: asPlayerId(playerId),
+				metadata,
+			};
+
+			const encoded = encodeMessage(original);
+
+			// Expected size: type(1) + playerIdLen(2) + playerId + hasMetadata(1) + metadataLen(4) + metadata
+			const expectedSize = 1 + 2 + playerId.length + 1 + 4 + metadata.length;
+			assert.strictEqual(
+				encoded.length,
+				expectedSize,
+				`Buffer should be exactly ${expectedSize} bytes`,
+			);
+		});
+
+		it("should handle large metadata", () => {
+			const largeMetadata = new Uint8Array(1000);
+			for (let i = 0; i < largeMetadata.length; i++) {
+				largeMetadata[i] = i % 256;
+			}
+
+			const original = {
+				type: MessageType.DropPlayer as const,
+				playerId: asPlayerId("player"),
+				metadata: largeMetadata,
+			};
+
+			const encoded = encodeMessage(original);
+			const decoded = decodeMessage(encoded);
+
+			assert.strictEqual(decoded.type, MessageType.DropPlayer);
+			if (decoded.type === MessageType.DropPlayer) {
+				assert.deepStrictEqual(decoded.metadata, largeMetadata);
+			}
+		});
+
+		it("should handle empty metadata", () => {
+			const original = {
+				type: MessageType.DropPlayer as const,
+				playerId: asPlayerId("player"),
+				metadata: new Uint8Array(0),
+			};
+
+			const encoded = encodeMessage(original);
+			const decoded = decodeMessage(encoded);
+
+			assert.strictEqual(decoded.type, MessageType.DropPlayer);
+			if (decoded.type === MessageType.DropPlayer) {
+				assert.deepStrictEqual(decoded.metadata, new Uint8Array(0));
+			}
+		});
+
+		it("should handle long player ID with metadata", () => {
+			const playerId = "very-long-player-identifier-for-testing-purposes";
+			const metadata = new Uint8Array([1, 2, 3]);
+
+			const original = {
+				type: MessageType.DropPlayer as const,
+				playerId: asPlayerId(playerId),
+				metadata,
+			};
+
+			const encoded = encodeMessage(original);
+			const decoded = decodeMessage(encoded);
+
+			assert.strictEqual(decoded.type, MessageType.DropPlayer);
+			if (decoded.type === MessageType.DropPlayer) {
+				assert.strictEqual(decoded.playerId, playerId);
+				assert.deepStrictEqual(decoded.metadata, metadata);
 			}
 		});
 	});
@@ -765,6 +981,101 @@ describe("Message Encoding/Decoding", () => {
 					return true;
 				},
 			);
+		});
+	});
+
+	describe("offset tracking - byte-level verification", () => {
+		// These tests verify that all fields are written at correct byte positions.
+		// They would catch bugs where offset isn't incremented after writing a field.
+
+		it("JoinReject should write reason at correct offset", () => {
+			const playerId = "abc";
+			const reason = "test";
+			const original = {
+				type: MessageType.JoinReject as const,
+				playerId: asPlayerId(playerId),
+				reason,
+			};
+
+			const encoded = encodeMessage(original);
+			const view = new DataView(encoded.buffer, encoded.byteOffset, encoded.byteLength);
+
+			// Verify structure: type(1) + playerIdLen(2) + playerId(3) + reasonLen(2) + reason(4)
+			assert.strictEqual(view.getUint8(0), MessageType.JoinReject, "type byte");
+			assert.strictEqual(view.getUint16(1), 3, "playerId length");
+			// playerId "abc" at offset 3
+			assert.strictEqual(view.getUint16(6), 4, "reason length at correct offset");
+			// reason "test" at offset 8
+			const reasonBytes = encoded.slice(8, 12);
+			assert.deepStrictEqual(
+				reasonBytes,
+				new TextEncoder().encode("test"),
+				"reason bytes at correct position",
+			);
+		});
+
+		it("DisconnectReport should write peerId at correct offset", () => {
+			const peerId = "peer1";
+			const original = {
+				type: MessageType.DisconnectReport as const,
+				disconnectedPeerId: asPlayerId(peerId),
+			};
+
+			const encoded = encodeMessage(original);
+			const view = new DataView(encoded.buffer, encoded.byteOffset, encoded.byteLength);
+
+			// Verify structure: type(1) + peerIdLen(2) + peerId(5)
+			assert.strictEqual(view.getUint8(0), MessageType.DisconnectReport, "type byte");
+			assert.strictEqual(view.getUint16(1), 5, "peerId length");
+			const peerIdBytes = encoded.slice(3, 8);
+			assert.deepStrictEqual(
+				peerIdBytes,
+				new TextEncoder().encode("peer1"),
+				"peerId bytes at correct position",
+			);
+		});
+
+		it("DropPlayer should write metadata at correct offset", () => {
+			const playerId = "p1";
+			const metadata = new Uint8Array([0xaa, 0xbb, 0xcc]);
+			const original = {
+				type: MessageType.DropPlayer as const,
+				playerId: asPlayerId(playerId),
+				metadata,
+			};
+
+			const encoded = encodeMessage(original);
+			const view = new DataView(encoded.buffer, encoded.byteOffset, encoded.byteLength);
+
+			// Verify structure: type(1) + playerIdLen(2) + playerId(2) + hasMetadata(1) + metadataLen(4) + metadata(3)
+			assert.strictEqual(view.getUint8(0), MessageType.DropPlayer, "type byte");
+			assert.strictEqual(view.getUint16(1), 2, "playerId length");
+			// playerId "p1" at offset 3
+			assert.strictEqual(view.getUint8(5), 1, "hasMetadata flag at correct offset");
+			assert.strictEqual(view.getUint32(6), 3, "metadata length at correct offset");
+			const metadataBytes = encoded.slice(10, 13);
+			assert.deepStrictEqual(
+				metadataBytes,
+				metadata,
+				"metadata bytes at correct position",
+			);
+		});
+
+		it("DropPlayer without metadata should have hasMetadata=0 at correct offset", () => {
+			const playerId = "player";
+			const original = {
+				type: MessageType.DropPlayer as const,
+				playerId: asPlayerId(playerId),
+			};
+
+			const encoded = encodeMessage(original);
+			const view = new DataView(encoded.buffer, encoded.byteOffset, encoded.byteLength);
+
+			// Verify structure: type(1) + playerIdLen(2) + playerId(6) + hasMetadata(1)
+			assert.strictEqual(view.getUint8(0), MessageType.DropPlayer, "type byte");
+			assert.strictEqual(view.getUint16(1), 6, "playerId length");
+			assert.strictEqual(view.getUint8(9), 0, "hasMetadata flag should be 0");
+			assert.strictEqual(encoded.length, 10, "buffer should end after hasMetadata flag");
 		});
 	});
 

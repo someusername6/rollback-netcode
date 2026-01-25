@@ -158,6 +158,9 @@ export class Session {
 		hash: number;
 	}> = [];
 
+	/** Tracks players whose playerJoined event has been emitted to prevent duplicates during resimulation */
+	private readonly emittedJoinEvents: Set<PlayerId> = new Set();
+
 	/**
 	 * Create a new session.
 	 * @throws ValidationError if config values are invalid
@@ -208,10 +211,15 @@ export class Session {
 			snapshotHistorySize: this.config.snapshotHistorySize,
 			maxSpeculationTicks: this.config.maxSpeculationTicks,
 			// During resimulation, emit playerJoined when crossing a player's joinTick
-			// so the game layer can re-add players that were lost during snapshot restore
+			// so the game layer can re-add players that were lost during snapshot restore.
+			// Skip if we've already emitted for this player (prevents duplicate events).
 			onPlayerAddDuringResimulation: (playerId, _tick) => {
+				if (this.emittedJoinEvents.has(playerId)) {
+					return; // Already emitted, skip duplicate
+				}
 				const playerInfo = this.playerManager.getPlayer(playerId);
 				if (playerInfo) {
+					this.emittedJoinEvents.add(playerId);
 					this.emit("playerJoined", playerInfo);
 				}
 			},
@@ -220,6 +228,16 @@ export class Session {
 				const playerInfo = this.playerManager.getPlayer(playerId);
 				if (playerInfo) {
 					this.emit("playerLeft", playerInfo);
+				}
+			},
+			// When rollback occurs, clear emittedJoinEvents for players whose joinTick
+			// is after the restore tick, since they need to be re-added during resimulation
+			onRollback: (restoreTick) => {
+				for (const playerId of this.emittedJoinEvents) {
+					const playerInfo = this.playerManager.getPlayer(playerId);
+					if (playerInfo?.joinTick !== null && playerInfo.joinTick > restoreTick) {
+						this.emittedJoinEvents.delete(playerId);
+					}
 				}
 			},
 		};
@@ -477,6 +495,7 @@ export class Session {
 		this._roomId = null;
 		this._isHost = false;
 		this.playerManager.clear();
+		this.emittedJoinEvents.clear();
 		this.engine.reset();
 
 		// Re-add local player
@@ -901,6 +920,8 @@ export class Session {
 			if (player.role === PlayerRole.Player) {
 				this.engine.removePlayer(playerId, player.leaveTick);
 			}
+			// Clear join event tracking so if player rejoins later, we emit again
+			this.emittedJoinEvents.delete(playerId);
 			this.emit("playerLeft", player);
 
 			// If host in host-authority mode, broadcast PlayerLeft to all
@@ -1241,7 +1262,9 @@ export class Session {
 		}
 
 		// Emit playerJoined BEFORE sending StateSync so the game layer can
-		// add the new player to its state before serialization
+		// add the new player to its state before serialization.
+		// Track that we've emitted to prevent duplicate events during resimulation.
+		this.emittedJoinEvents.add(playerId);
 		this.emit("playerJoined", playerInfo);
 
 		// Send current game state to the joining player if game is in progress
@@ -1330,6 +1353,8 @@ export class Session {
 		if (message.role === PlayerRole.Player) {
 			this.engine.addPlayer(message.playerId, message.joinTick);
 		}
+		// Track that we've emitted to prevent duplicate events during resimulation
+		this.emittedJoinEvents.add(message.playerId);
 		this.emit("playerJoined", playerInfo);
 	}
 
@@ -1344,6 +1369,8 @@ export class Session {
 			player.leaveTick = message.leaveTick;
 			player.connectionState = PlayerConnectionState.Disconnected;
 			this.engine.removePlayer(message.playerId, message.leaveTick);
+			// Clear join event tracking so if player rejoins later, we emit again
+			this.emittedJoinEvents.delete(message.playerId);
 			this.emit("playerLeft", player);
 		}
 	}

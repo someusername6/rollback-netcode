@@ -820,4 +820,32 @@ describe("TransformingTransport", () => {
 			assert.strictEqual(DEFAULT_TRANSFORMING_TRANSPORT_CONFIG.reassemblyTimeout, 5000);
 		});
 	});
+
+	describe("dispose", () => {
+		it("should call dispose on inner transport", () => {
+			let innerDisposeCallCount = 0;
+			const local1 = new LocalTransport("peer-1");
+			// Add dispose tracking to the inner transport
+			local1.dispose = () => {
+				innerDisposeCallCount++;
+			};
+
+			const t1 = new TransformingTransport(local1, {});
+
+			assert.strictEqual(innerDisposeCallCount, 0);
+			t1.dispose();
+			assert.strictEqual(innerDisposeCallCount, 1, "inner transport dispose should be called");
+		});
+
+		it("should handle inner transport without dispose method", () => {
+			const local1 = new LocalTransport("peer-1");
+			// Remove dispose method to simulate a transport without dispose
+			(local1 as { dispose?: () => void }).dispose = undefined;
+
+			const t1 = new TransformingTransport(local1, {});
+
+			// Should not throw when inner transport has no dispose method
+			assert.doesNotThrow(() => t1.dispose());
+		});
+	});
 });

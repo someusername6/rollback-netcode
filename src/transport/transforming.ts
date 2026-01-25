@@ -232,12 +232,15 @@ export class TransformingTransport implements TransportAdapter {
 	}
 
 	/**
-	 * Stop the cleanup timer. Call this when disposing of the transport.
+	 * Stop the cleanup timer and dispose of the inner transport.
+	 * Call this when disposing of the transport.
 	 */
 	dispose(): void {
 		this.stopCleanupTimer();
 		this.messageIdCounters.clear();
 		this.reassemblyBuffers.clear();
+		// Dispose of the wrapped transport to prevent memory leaks
+		this.inner.dispose?.();
 	}
 
 	/**

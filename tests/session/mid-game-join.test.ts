@@ -324,4 +324,61 @@ describe("Mid-game join", () => {
     hostSession.destroy();
     guestSession.destroy();
   });
+
+  it("should emit playerJoined exactly once on initial join", async () => {
+    // This test verifies that playerJoined is only emitted once when a
+    // player initially joins, without any duplicate from immediate
+    // resimulation.
+
+    // Setup host
+    const hostGame = new MultiPlayerGame();
+    const hostTransport = new LocalTransport("host");
+    const hostSession = createSession({
+      game: hostGame,
+      transport: hostTransport,
+    });
+
+    // Track playerJoined events per player to detect duplicates
+    const hostPlayerJoinedEvents: string[] = [];
+    hostSession.on("playerJoined", (info) => {
+      hostPlayerJoinedEvents.push(info.id);
+      hostGame.addPlayer(info.id);
+    });
+
+    await hostSession.createRoom();
+    hostGame.addPlayer("host", 50, 50);
+    hostSession.start();
+
+    // Host runs to tick 10
+    for (let i = 0; i < 10; i++) {
+      hostSession.tick(new Uint8Array([128, 128]));
+    }
+
+    // Guest joins at tick 10
+    const guestGame = new MultiPlayerGame();
+    const guestTransport = new LocalTransport("guest");
+    const guestSession = createSession({
+      game: guestGame,
+      transport: guestTransport,
+    });
+
+    guestSession.on("playerJoined", (info) => {
+      guestGame.addPlayer(info.id);
+    });
+
+    LocalTransport.link(hostTransport, guestTransport);
+    await guestSession.joinRoom("room", "host");
+    flushTransports([hostTransport, guestTransport]);
+
+    // Guest joins - should emit exactly once on the host
+    const guestJoinCount = hostPlayerJoinedEvents.filter(id => id === "guest").length;
+    assert.strictEqual(
+      guestJoinCount,
+      1,
+      "Guest playerJoined should be emitted exactly once on initial join"
+    );
+
+    hostSession.destroy();
+    guestSession.destroy();
+  });
 });

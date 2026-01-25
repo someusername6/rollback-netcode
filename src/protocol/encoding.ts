@@ -788,7 +788,7 @@ function encodeJoinRejectMessage(msg: JoinRejectMessage): Uint8Array {
 	let offset = 0;
 	view.setUint8(offset++, MessageType.JoinReject);
 	offset += writeString(view, offset, msg.playerId);
-	writeString(view, offset, msg.reason);
+	offset += writeString(view, offset, msg.reason);
 
 	return buffer;
 }
@@ -1069,7 +1069,7 @@ function encodeDisconnectReportMessage(
 
 	let offset = 0;
 	view.setUint8(offset++, MessageType.DisconnectReport);
-	writeString(view, offset, msg.disconnectedPeerId);
+	offset += writeString(view, offset, msg.disconnectedPeerId);
 
 	return buffer;
 }
@@ -1132,7 +1132,7 @@ function encodeDropPlayerMessage(msg: DropPlayerMessage): Uint8Array {
 	offset += writeString(view, offset, msg.playerId);
 	view.setUint8(offset++, hasMetadata ? 1 : 0);
 	if (hasMetadata && msg.metadata) {
-		writeBytes(view, offset, msg.metadata);
+		offset += writeBytes(view, offset, msg.metadata);
 	}
 
 	return buffer;

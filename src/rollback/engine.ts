@@ -55,6 +55,13 @@ export interface RollbackEngineConfig {
 	 * Called when resimulating past a player's leaveTick.
 	 */
 	onPlayerRemoveDuringResimulation?: PlayerLifecycleCallback;
+
+	/**
+	 * Callback invoked when a rollback occurs, before resimulation.
+	 * Receives the tick that we're rolling back to (the restore tick).
+	 * Use this to clear state that needs to be re-applied during resimulation.
+	 */
+	onRollback?: (restoreTick: Tick) => void;
 }
 
 /**
@@ -73,6 +80,7 @@ export class RollbackEngine {
 	private readonly onPlayerRemoveDuringResimulation:
 		| PlayerLifecycleCallback
 		| undefined;
+	private readonly onRollback: ((restoreTick: Tick) => void) | undefined;
 
 	private _currentTick: Tick;
 	private _confirmedTick: Tick;
@@ -89,6 +97,7 @@ export class RollbackEngine {
 		this.onPlayerAddDuringResimulation = config.onPlayerAddDuringResimulation;
 		this.onPlayerRemoveDuringResimulation =
 			config.onPlayerRemoveDuringResimulation;
+		this.onRollback = config.onRollback;
 
 		this.snapshotBuffer = new SnapshotBuffer(config.snapshotHistorySize ?? 120);
 		this.inputBuffer = new InputBuffer();
@@ -319,6 +328,9 @@ export class RollbackEngine {
 
 		// Restore game state
 		this.game.deserialize(snapshot.state);
+
+		// Notify about rollback before resimulation
+		this.onRollback?.(restoreTick);
 
 		// Clear used inputs from the misprediction point onwards
 		this.inputBuffer.clearAllUsedInputsFrom(earliestMisprediction);
