@@ -644,20 +644,6 @@ export interface NetworkEvents {
 	messageReceived: (peerId: string, data: Uint8Array) => void;
 }
 
-/**
- * Sync-related events.
- */
-export interface SyncEvents {
-	/** Fired when a rollback occurs */
-	rollback: (fromTick: Tick, toTick: Tick) => void;
-
-	/** Fired when inputs are confirmed for a tick */
-	inputConfirmed: (tick: Tick) => void;
-
-	/** Fired when state is synchronized */
-	stateSync: (tick: Tick) => void;
-}
-
 // =============================================================================
 // Snapshot
 // =============================================================================
