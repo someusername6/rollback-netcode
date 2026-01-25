@@ -682,6 +682,29 @@ export class Session {
 		// Run the engine tick (both pilots and spectators run simulation)
 		const result = this.engine.tick();
 
+		// Handle rollback errors (e.g., "cannot rollback: no snapshots available")
+		// A failed rollback means we couldn't correct a misprediction, which may lead to desync
+		if (result.error) {
+			this.debug.warn("Rollback error", {
+				tick: result.tick,
+				error: result.error.message,
+			});
+
+			this.emitError(result.error, {
+				source: ErrorSource.Engine,
+				recoverable: true,
+				details: {
+					tick: result.tick,
+					rollbackTarget: result.error.tick,
+				},
+			});
+
+			// Non-hosts should request sync to recover from potential desync
+			if (!this._isHost) {
+				this.requestSync();
+			}
+		}
+
 		// Log rollback if it occurred
 		if (result.rolledBack && result.rollbackTicks !== undefined) {
 			this.debug.log("Rollback triggered", {
