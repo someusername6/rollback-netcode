@@ -1159,15 +1159,33 @@ export class Session {
 			this.engine.addPlayer(playerId, playerInfo.joinTick);
 		}
 
-		// Notify other players
+		// Emit playerJoined BEFORE sending StateSync so the game layer can
+		// add the new player to its state before serialization
+		this.emit("playerJoined", playerInfo);
+
+		// Send current game state to the joining player if game is in progress
+		// This is critical for mid-game joins - the new player needs the full state
+		if (this._state === SessionState.Playing) {
+			const state = this.engine.getState();
+			this.sendToPeer(
+				peerId,
+				createStateSync(
+					state.tick,
+					state.state,
+					this.engine.getCurrentHash(),
+					state.playerTimeline,
+				),
+				true,
+			);
+		}
+
+		// Notify other players about the new join
 		if (this._state === SessionState.Playing && playerInfo.joinTick !== null) {
 			this.broadcast(
 				createPlayerJoined(playerId, playerRole, playerInfo.joinTick),
 				true,
 			);
 		}
-
-		this.emit("playerJoined", playerInfo);
 	}
 
 	/**
