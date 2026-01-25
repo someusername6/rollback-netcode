@@ -5,15 +5,20 @@ This guide explains how to tune the rollback netcode configuration for your spec
 ## Configuration Options
 
 ```typescript
+import { Topology, DesyncAuthority } from 'rollback-netcode';
+
 interface SessionConfig {
-  tickRate: number;           // Simulation ticks per second (default: 60)
-  maxPlayers: number;         // Maximum players allowed (default: 4)
-  topology: 'star' | 'mesh';  // Network topology (default: 'star')
-  snapshotHistorySize: number; // Snapshots to keep (default: 120)
-  maxSpeculationTicks: number; // Max prediction ahead (default: 60)
-  hashInterval: number;        // Desync check frequency (default: 60)
-  disconnectTimeout: number;   // Disconnect detection ms (default: 5000)
-  debug: boolean;              // Enable debug logging (default: false)
+  tickRate: number;              // Simulation ticks per second (default: 60)
+  maxPlayers: number;            // Maximum players allowed (default: 4)
+  topology: Topology;            // Topology.Star or Topology.Mesh (default: Star)
+  snapshotHistorySize: number;   // Snapshots to keep (default: 120)
+  maxSpeculationTicks: number;   // Max ticks ahead without confirmed inputs (default: 60)
+  hashInterval: number;          // Ticks between desync checks (default: 60)
+  disconnectTimeout: number;     // Ms before disconnecting idle peer (default: 5000)
+  debug: boolean;                // Enable debug logging (default: false)
+  desyncAuthority: DesyncAuthority;  // Who resolves desyncs (default: Peer)
+  lagReportThreshold: number;    // Ticks behind before reporting lag (default: 30)
+  inputRedundancy: number;       // Inputs per message for reliability (default: 3)
 }
 ```
 
@@ -48,7 +53,7 @@ Memory = snapshotHistorySize × (gameStateSize + overhead)
 | 240 snapshots | ~280 KB | ~2.6 MB |
 
 **Recommendations:**
-- `snapshotHistorySize` should be ≥ `maxSpeculationTicks`
+- `snapshotHistorySize` must be ≥ `maxSpeculationTicks`
 - For 60 tick rate: 120 snapshots = 2 seconds of history
 - For high-latency networks: increase to 180-240 snapshots
 
@@ -108,54 +113,106 @@ How often to broadcast state hashes for desync detection.
 - **4+ players:** Star for connection simplicity
 - **Mobile/constrained:** Star (fewer connections = less battery)
 
+### Input Redundancy
+
+Each input message includes the last N inputs for reliability on lossy connections.
+
+| Higher Redundancy | Lower Redundancy |
+|------------------|------------------|
+| Better packet loss recovery | Less bandwidth |
+| More bandwidth | More rollbacks on loss |
+
+**Recommendations:**
+- **Reliable networks:** 1-2
+- **Typical networks:** 3 (default)
+- **Lossy networks (mobile):** 4-5
+
+## TransformingTransport
+
+For games with large state (>16KB), use `TransformingTransport` to add compression and message segmentation:
+
+```typescript
+import { TransformingTransport, WebRTCTransport } from 'rollback-netcode';
+
+const webrtc = new WebRTCTransport(localPeerId, { onSignal });
+const transport = new TransformingTransport(webrtc, {
+  compression: 'auto',        // 'auto' | 'always' | 'never'
+  compressionThreshold: 128,  // Only compress messages > 128 bytes
+  maxSegmentSize: 16000,      // WebRTC DataChannel limit
+  reassemblyTimeout: 5000,    // Timeout for incomplete messages
+});
+```
+
+**When to use:**
+- State sync messages exceed 16KB
+- Bandwidth is constrained and state is compressible
+- Playing over unreliable connections
+
+**Compression modes:**
+- `'auto'` (default): Compress only if result is smaller
+- `'always'`: Always compress (good for text-heavy state)
+- `'never'`: Skip compression (if state is already compressed)
+
 ## Example Configurations
 
 ### Fast-Paced Fighting Game
 ```typescript
-const config: Partial<SessionConfig> = {
+import { Topology } from 'rollback-netcode';
+
+const config = {
   tickRate: 60,
   maxPlayers: 2,
-  topology: 'mesh',
+  topology: Topology.Mesh,     // Direct connection for lowest latency
   snapshotHistorySize: 120,
-  maxSpeculationTicks: 30,  // Low latency priority
+  maxSpeculationTicks: 30,     // Low latency priority
   hashInterval: 120,
+  inputRedundancy: 2,          // Minimal redundancy for low bandwidth
 };
 ```
 
 ### 4-Player Party Game
 ```typescript
-const config: Partial<SessionConfig> = {
+import { Topology } from 'rollback-netcode';
+
+const config = {
   tickRate: 30,
   maxPlayers: 4,
-  topology: 'star',
+  topology: Topology.Star,     // Simpler with more players
   snapshotHistorySize: 90,
   maxSpeculationTicks: 45,
   hashInterval: 60,
+  inputRedundancy: 3,
 };
 ```
 
 ### 8-Player Strategy Game
 ```typescript
-const config: Partial<SessionConfig> = {
+import { Topology } from 'rollback-netcode';
+
+const config = {
   tickRate: 20,
   maxPlayers: 8,
-  topology: 'star',
+  topology: Topology.Star,
   snapshotHistorySize: 60,
   maxSpeculationTicks: 40,
   hashInterval: 40,
+  inputRedundancy: 4,          // Higher for reliability
 };
 ```
 
 ### High-Latency Global Game
 ```typescript
-const config: Partial<SessionConfig> = {
+import { Topology } from 'rollback-netcode';
+
+const config = {
   tickRate: 60,
   maxPlayers: 4,
-  topology: 'star',
-  snapshotHistorySize: 240,  // 4 seconds of history
-  maxSpeculationTicks: 120,  // Allow 2 seconds ahead
+  topology: Topology.Star,
+  snapshotHistorySize: 240,    // 4 seconds of history
+  maxSpeculationTicks: 120,    // Allow 2 seconds ahead
   hashInterval: 60,
-  disconnectTimeout: 10000,  // Longer timeout for high latency
+  disconnectTimeout: 10000,    // Longer timeout for high latency
+  inputRedundancy: 5,          // Higher redundancy for reliability
 };
 ```
 
@@ -177,6 +234,24 @@ const session = createSession({
   game,
   transport,
   config: { debug: true },
+});
+```
+
+### Session Events
+
+Listen for events to monitor performance:
+
+```typescript
+session.on('rollback', (fromTick, toTick) => {
+  console.log(`Rolled back ${fromTick - toTick} ticks`);
+});
+
+session.on('desync', (tick, localHash, remoteHash) => {
+  console.warn(`Desync at tick ${tick}`);
+});
+
+session.on('lagReport', (playerId, ticksBehind) => {
+  console.warn(`Player ${playerId} is ${ticksBehind} ticks behind`);
 });
 ```
 
@@ -209,4 +284,26 @@ Smaller game state = faster serialization, less memory, less bandwidth.
 // After: 6 bytes per entity (3 × 2-byte fixed-point)
 // Store as 1/100 units, range ±327 meters
 { x: int16, y: int16, z: int16 }
+```
+
+## Large State Handling
+
+For games with large state (complex simulations, many entities):
+
+1. **Use TransformingTransport** for automatic compression
+2. **Optimize serialization** - binary formats, not JSON
+3. **Consider delta sync** - only send changes (not built-in, game-level optimization)
+4. **Reduce snapshot frequency** - if rollbacks are rare
+
+```typescript
+import { TransformingTransport, WebRTCTransport } from 'rollback-netcode';
+
+// Wrap transport with compression for large states
+const transport = new TransformingTransport(
+  new WebRTCTransport(peerId, { onSignal }),
+  {
+    compression: 'auto',
+    maxSegmentSize: 14000,  // Leave headroom for WebRTC overhead
+  }
+);
 ```

@@ -1,21 +1,23 @@
 # Architecture
 
+This document describes the internal architecture of the rollback netcode library. It's intended for contributors and advanced users who want to understand how the library works.
+
 ## Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         Game Application                            │
 │  ┌───────────────────────────────────────────────────────────────┐  │
-│  │                    Game-Provided Interfaces                    │  │
+│  │                    Game Interface                              │  │
 │  │  - serialize(): Uint8Array      - deserialize(data): void     │  │
-│  │  - step(inputs: PlayerInputs)   - hash(): number              │  │
+│  │  - step(inputs: Map)            - hash(): number              │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 │                                  │                                   │
 │  ┌───────────────────────────────▼───────────────────────────────┐  │
 │  │                     Rollback Netcode Library                   │  │
 │  │  ┌─────────────┐  ┌─────────────┐  ┌───────────────────────┐  │  │
 │  │  │   Session   │  │  Rollback   │  │   Transport Adapter   │  │  │
-│  │  │   Manager   │──│   Engine    │──│   (WebRTC default)    │  │  │
+│  │  │   Manager   │──│   Engine    │──│   (WebRTC/Local)      │  │  │
 │  │  └─────────────┘  └─────────────┘  └───────────────────────┘  │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────┘
@@ -25,13 +27,14 @@
 
 ### 1. Session Manager
 
-Manages the multiplayer session lifecycle.
+Manages the multiplayer session lifecycle, player connections, and game state transitions.
 
 **Responsibilities:**
+- Room creation and joining
 - Player join/leave handling
-- Session state (lobby, playing, paused)
-- Host election and migration (if supported)
-- Connection health monitoring
+- Session state management (lobby, playing, paused)
+- Host authority and control
+- Event dispatching
 
 **States:**
 ```
@@ -40,14 +43,29 @@ DISCONNECTED → CONNECTING → LOBBY → PLAYING ⇄ PAUSED
                               └────────┘ (player join/leave)
 ```
 
-**Dynamic Join/Leave:**
-- Players can join/leave during PLAYING state
-- Join: triggers state sync, then player added to simulation
-- Leave: player removed, remaining players continue
+**Key Types:**
+```typescript
+enum SessionState {
+  Disconnected = 0,
+  Connecting = 1,
+  Lobby = 2,
+  Playing = 3,
+  Paused = 4,
+}
+
+interface SessionEvents {
+  stateChange: (newState: SessionState, oldState: SessionState) => void;
+  playerJoined: (player: PlayerInfo) => void;
+  playerLeft: (player: PlayerInfo) => void;
+  desync: (tick: Tick, localHash: number, remoteHash: number) => void;
+  gameStart: () => void;
+  error: (error: Error, context: ErrorContext) => void;
+}
+```
 
 ### 2. Rollback Engine
 
-The core netcode implementation.
+The core netcode implementation that handles input synchronization, prediction, and rollback.
 
 **Responsibilities:**
 - Input collection and broadcast
@@ -60,16 +78,16 @@ The core netcode implementation.
 **Key Data Structures:**
 
 ```typescript
-// Per-player input buffer
+// Per-player input tracking
 interface InputBuffer {
   // Inputs received from network (may have gaps)
-  received: Map<Tick, Input>;
+  received: Map<Tick, Uint8Array>;
 
   // Highest tick T where ticks 1..T are contiguous
   confirmedTick: Tick;
 
   // What input was used when simulating each tick
-  usedInputs: Map<Tick, Input>;
+  usedInputs: Map<Tick, Uint8Array>;
 }
 
 // State snapshot for rollback
@@ -78,45 +96,85 @@ interface Snapshot {
   state: Uint8Array;  // Serialized game state
   hash: number;       // For desync detection
 }
-
-// Ring buffer of recent snapshots
-interface SnapshotBuffer {
-  snapshots: Snapshot[];
-  capacity: number;   // e.g., 120 ticks = 2 seconds at 60fps
-  oldest: Tick;
-  newest: Tick;
-}
 ```
 
 ### 3. Transport Adapter
 
-Abstraction over network transport.
+Abstraction over network transport, allowing different implementations.
 
 **Interface:**
 ```typescript
 interface TransportAdapter {
-  // Connection
+  // Connection management
   connect(peerId: string): Promise<void>;
   disconnect(peerId: string): void;
+  disconnectAll(): void;
 
   // Messaging
   send(peerId: string, message: Uint8Array, reliable: boolean): void;
-  onMessage(handler: (peerId: string, message: Uint8Array) => void): void;
+  broadcast(message: Uint8Array, reliable: boolean): void;
 
-  // Events
-  onConnect(handler: (peerId: string) => void): void;
-  onDisconnect(handler: (peerId: string) => void): void;
+  // Event callbacks (set by library)
+  onMessage: ((peerId: string, message: Uint8Array) => void) | null;
+  onConnect: ((peerId: string) => void) | null;
+  onDisconnect: ((peerId: string) => void) | null;
+
+  // State
+  readonly connectedPeers: ReadonlySet<string>;
+  readonly localPeerId: string;
+
+  // Optional metrics
+  getConnectionMetrics?(peerId: string): ConnectionMetrics | null;
 }
 ```
 
 **Implementations:**
-- `WebRTCTransport` - Default, uses WebRTC DataChannels
-- `LocalTransport` - For testing, simulates network in-memory
-- Custom adapters possible for WebSocket fallback, etc.
+
+| Transport | Description | Use Case |
+|-----------|-------------|----------|
+| `WebRTCTransport` | WebRTC DataChannels | Production |
+| `LocalTransport` | In-memory, simulated latency | Testing |
+| `TransformingTransport` | Wrapper with compression/segmentation | Large states |
+
+### 4. TransformingTransport
+
+A transport wrapper that adds compression and message segmentation for large messages.
+
+```
+Session.send(message)
+       │
+       ▼
+┌──────────────────────────────────────┐
+│       TransformingTransport          │
+│  ┌────────────────────────────────┐  │
+│  │  1. Compression (pako/gzip)    │  │
+│  │     - Header: 0x00=raw, 0x01=gz│  │
+│  └────────────────────────────────┘  │
+│  ┌────────────────────────────────┐  │
+│  │  2. Segmentation               │  │
+│  │     - Header: msgId|idx|total  │  │
+│  │     - Reassembly with timeout  │  │
+│  └────────────────────────────────┘  │
+└──────────────────────────────────────┘
+       │
+       ▼
+  Inner Transport (WebRTC/Local)
+```
+
+**Configuration:**
+```typescript
+interface TransformingTransportConfig {
+  compression: 'auto' | 'always' | 'never';  // default: 'auto'
+  compressionThreshold: number;               // default: 128 bytes
+  segmentation: boolean;                      // default: true
+  maxSegmentSize: number;                     // default: 16000 bytes
+  reassemblyTimeout: number;                  // default: 5000 ms
+}
+```
 
 ## Network Topology
 
-### Option A: Star (through host)
+### Star Topology (Default)
 
 ```
      Player 2
@@ -129,11 +187,12 @@ Player 1 ◄──► Host ◄──► Player 3
 ```
 
 - All traffic routes through host
-- Simplest implementation
+- Host relays inputs between clients
+- Simpler: N-1 connections
 - Host has latency advantage
-- If host disconnects, game ends (unless host migration)
+- If host disconnects, session ends
 
-### Option B: P2P Mesh
+### Mesh Topology
 
 ```
 Player 1 ◄───────► Player 2
@@ -149,12 +208,8 @@ Player 3 ◄───────► Player 4
 
 - Direct connections between all peers
 - Lower latency between any two players
-- More connections: n*(n-1)/2 for n players
+- More connections: N×(N-1)/2
 - More complex, but more resilient
-
-### Recommendation
-
-Support both, with star as default (simpler). Mesh for advanced users who need minimum latency.
 
 ## Dynamic Join/Leave
 
@@ -165,8 +220,6 @@ New Player                    Host                      Existing Peers
     │                          │                              │
     │──── JOIN_REQUEST ───────>│                              │
     │                          │                              │
-    │                          │─── PAUSE (optional) ────────>│
-    │                          │                              │
     │<─── JOIN_ACCEPT ─────────│                              │
     │     (playerList, config) │                              │
     │                          │                              │
@@ -176,79 +229,26 @@ New Player                    Host                      Existing Peers
     │                          │─── PLAYER_JOINED ───────────>│
     │                          │    (playerId, tick)          │
     │                          │                              │
-    │                          │─── RESUME (if paused) ──────>│
-    │                          │                              │
     │<────────── Normal input flow begins ───────────────────>│
 ```
 
 **Key Points:**
 - Join event is tied to a specific tick (all peers agree)
-- New player doesn't participate until after that tick
+- New player receives full state sync before participating
 - Existing peers add new player to input tracking at the join tick
-- If rollback crosses the join tick, input buffers handle player not existing before then
 
 ### Player Leave
 
 ```
 Leaving Player               Host/Peers
       │                          │
-      │                     (disconnect detected or LEAVE sent)
+      │                     (disconnect detected or voluntary leave)
       │                          │
       │                          │─── PLAYER_LEFT ───────────> all peers
       │                          │    (playerId, tick, reason)
       │                          │
-      │                          │   (peers remove player from
-      │                          │    input tracking at tick)
-      │                          │
-      │                          │   (game callback: onPlayerLeave)
-```
-
-**Key Points:**
-- Leave event tied to specific tick
-- Inputs after leave tick are not expected/tracked
-- Rollback across leave tick: player existed before, not after
-- Game decides what happens to player's entities (remove, AI, etc.)
-
-### Input Buffer with Variable Players
-
-```typescript
-interface TickInputs {
-  tick: Tick;
-  activePlayers: Set<PlayerId>;  // Who was in the game at this tick
-  inputs: Map<PlayerId, Input>;   // Their inputs
-}
-
-interface InputBuffer {
-  // Track which players were active at each tick
-  playerTimeline: Map<Tick, Set<PlayerId>>;
-
-  // Per-player input tracking
-  playerInputs: Map<PlayerId, {
-    joinTick: Tick;
-    leaveTick: Tick | null;  // null if still active
-    received: Map<Tick, Input>;
-    confirmedTick: Tick;
-    usedInputs: Map<Tick, Input>;
-  }>;
-}
-```
-
-When predicting inputs, check if player was active at that tick:
-
-```typescript
-function getInputForTick(playerId: PlayerId, tick: Tick): Input | null {
-  const player = playerInputs.get(playerId);
-  if (!player) return null;
-  if (tick < player.joinTick) return null;
-  if (player.leaveTick !== null && tick >= player.leaveTick) return null;
-
-  // Player was active at this tick
-  const confirmed = player.received.get(tick);
-  if (confirmed !== undefined) return confirmed;
-
-  // Predict based on last confirmed
-  return predictInput(playerId, tick);
-}
+      │                          │   (peers stop expecting inputs
+      │                          │    from player at that tick)
 ```
 
 ## Message Protocol
@@ -256,71 +256,24 @@ function getInputForTick(playerId: PlayerId, tick: Tick): Input | null {
 ### Message Types
 
 ```typescript
-// Input broadcast (every tick, unreliable channel)
-interface InputMessage {
-  type: 'INPUT';
-  tick: Tick;
-  playerId: PlayerId;
-  input: Uint8Array;  // Game-defined encoding
-}
-
-// Input acknowledgment (for reliability layer)
-interface InputAckMessage {
-  type: 'INPUT_ACK';
-  playerId: PlayerId;
-  ackedTick: Tick;
-}
-
-// State hash for desync detection (periodic, reliable channel)
-interface HashMessage {
-  type: 'HASH';
-  tick: Tick;
-  hash: number;
-}
-
-// Full state sync (for desync recovery, reliable channel)
-interface SyncMessage {
-  type: 'SYNC';
-  tick: Tick;
-  state: Uint8Array;
-}
-
-// Session control
-interface PauseMessage { type: 'PAUSE'; tick: Tick; reason: string; }
-interface ResumeMessage { type: 'RESUME'; tick: Tick; }
-
-// Player join/leave
-interface JoinRequestMessage {
-  type: 'JOIN_REQUEST';
-  playerId: PlayerId;
-}
-
-interface JoinAcceptMessage {
-  type: 'JOIN_ACCEPT';
-  playerId: PlayerId;
-  assignedId: PlayerId;  // Host may assign different ID
-  players: PlayerId[];   // Current player list
-  config: SessionConfig;
-}
-
-interface StateSyncMessage {
-  type: 'STATE_SYNC';
-  tick: Tick;
-  state: Uint8Array;
-  playerTimeline: Array<{ playerId: PlayerId; joinTick: Tick; leaveTick: Tick | null }>;
-}
-
-interface PlayerJoinedMessage {
-  type: 'PLAYER_JOINED';
-  playerId: PlayerId;
-  tick: Tick;  // Tick at which player becomes active
-}
-
-interface PlayerLeftMessage {
-  type: 'PLAYER_LEFT';
-  playerId: PlayerId;
-  tick: Tick;  // Tick at which player became inactive
-  reason: 'voluntary' | 'timeout' | 'kicked';
+enum MessageType {
+  Input = 1,         // Player input for a tick
+  InputAck = 2,      // Acknowledgment of received input
+  Hash = 3,          // State hash for desync detection
+  Sync = 4,          // Request for state sync
+  StateSync = 5,     // Full state synchronization
+  JoinRequest = 6,   // Request to join session
+  JoinAccept = 7,    // Acceptance of join request
+  Pause = 8,         // Pause game
+  Resume = 9,        // Resume game
+  PlayerJoined = 10, // Notification of new player
+  PlayerLeft = 11,   // Notification of player leaving
+  Ping = 12,         // Latency measurement
+  Pong = 13,         // Latency response
+  LagReport = 14,    // Report of lagging player
+  DisconnectReport = 15,  // Report of disconnection
+  DropPlayer = 16,   // Command to drop a player
+  ResumeCountdown = 17,   // Countdown to resume
 }
 ```
 
@@ -328,11 +281,29 @@ interface PlayerLeftMessage {
 
 | Message Type | Channel | Rationale |
 |--------------|---------|-----------|
-| INPUT | Unreliable | High frequency, missing one is OK (predicted) |
-| INPUT_ACK | Unreliable | Lost acks just delay confirmation |
-| HASH | Reliable | Must arrive to detect desync |
-| SYNC | Reliable | Large, must arrive intact |
+| Input | Unreliable | High frequency, missing one is OK (predicted) |
+| InputAck | Unreliable | Lost acks just delay confirmation |
+| Hash | Reliable | Must arrive to detect desync |
+| StateSync | Reliable | Large, must arrive intact |
 | Session control | Reliable | Critical, must arrive |
+
+### Binary Encoding
+
+Messages are encoded in a compact binary format:
+
+```
+┌──────────┬──────────────────────────────────────┐
+│ Type (1B)│ Payload (variable)                   │
+└──────────┴──────────────────────────────────────┘
+```
+
+Input messages include redundancy for reliability on lossy connections:
+
+```
+┌──────────┬──────────┬──────────┬─────────────────┐
+│ Type (1B)│ Tick (4B)│ Count(1B)│ Inputs (N × var)│
+└──────────┴──────────┴──────────┴─────────────────┘
+```
 
 ## Rollback Algorithm
 
@@ -341,20 +312,18 @@ interface PlayerLeftMessage {
 ```
 1. Collect local input
 2. Broadcast local input to all peers
-3. For each remote player:
-   a. Check if confirmed inputs arrived
-   b. If new confirmed inputs:
-      - Update confirmedTick
-      - Compare confirmed vs used inputs
-      - If mismatch found: mark rollback needed
+3. Process received inputs:
+   a. Update confirmed tick for each player
+   b. Compare confirmed vs predicted inputs
+   c. If mismatch: mark rollback needed
 4. If rollback needed:
    a. Find earliest mispredicted tick
    b. Restore snapshot from that tick
-   c. Resimulate forward to current tick with corrected inputs
-5. Predict inputs for any remote players without confirmed input
-6. Step simulation with all inputs (local + confirmed/predicted)
+   c. Resimulate forward to current tick
+5. Predict inputs for players without confirmed input
+6. Step simulation with all inputs
 7. Save snapshot of current state
-8. Render (with optional interpolation to smooth corrections)
+8. Return tick result to game for rendering
 ```
 
 ### Input Prediction Strategy
@@ -362,56 +331,63 @@ interface PlayerLeftMessage {
 Default: Repeat last confirmed input.
 
 ```typescript
-function predictInput(player: PlayerId, tick: Tick): Input {
-  const buffer = inputBuffers.get(player);
-  const lastConfirmed = buffer.received.get(buffer.confirmedTick);
-  return lastConfirmed ?? defaultInput;
-}
+const DEFAULT_INPUT_PREDICTOR: InputPredictor = {
+  predict(playerId, tick, lastConfirmed) {
+    return lastConfirmed ?? new Uint8Array(0);
+  }
+};
 ```
 
-Works well for continuous inputs (thrust, turn). Mispredicts on button press/release, causing brief visual corrections.
+This works well for continuous inputs (movement, thrust). Mispredictions occur on button press/release, causing brief visual corrections.
 
 ### Rollback Limits
 
-| Parameter | Default | Rationale |
-|-----------|---------|-----------|
-| Snapshot history | 120 ticks (2 sec) | Covers 2x worst-case intercontinental RTT |
-| Max speculation | 60 ticks (1 sec) | Limits how far ahead before pausing |
-| Pause threshold | 30 ticks (0.5 sec) | When to pause waiting for slow peer |
-| Hash interval | 60 ticks (1 sec) | Frequency of desync checks |
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `snapshotHistorySize` | 120 ticks | How far back we can roll back |
+| `maxSpeculationTicks` | 60 ticks | How far ahead without confirmed inputs |
+| `hashInterval` | 60 ticks | Frequency of desync checks |
 
 ## Desync Detection and Recovery
 
 ### Detection
 
-1. Every `hashInterval` ticks, each peer computes `game.hash()`
-2. Hashes are broadcast to all peers (or to host in star topology)
-3. Host/peers compare hashes for the same tick
+1. Every `hashInterval` ticks, compute `game.hash()`
+2. Broadcast hash to peers (or host in star topology)
+3. Compare hashes for the same tick
 4. If mismatch detected, initiate recovery
 
 ### Recovery
 
 **Star topology:**
-1. Host sends `SYNC` message with authoritative state
+1. Host sends `StateSync` message with authoritative state
 2. Desynced client restores state and continues
 
 **Mesh topology:**
-1. Peers vote on correct hash (majority wins)
-2. Minority peers request `SYNC` from a majority peer
+1. Peers compare hashes independently
+2. Desynced peer requests `StateSync` from another peer
 3. Restore state and continue
 
 ## WebRTC Transport Details
 
 ### Signaling
 
-Library does NOT include signaling server. Users must provide:
-- A way to exchange SDP offers/answers
-- A way to exchange ICE candidates
+The library does NOT include a signaling server. Users must provide a way to exchange:
+- SDP offers/answers
+- ICE candidates
 
-Options:
-- Firebase Realtime Database
-- Custom WebSocket server
-- Copy-paste for testing
+The `WebRTCTransport` accepts signaling callbacks:
+
+```typescript
+const transport = new WebRTCTransport(localPeerId, {
+  onSignal: async (peerId, signal) => {
+    // Send to peer via your signaling mechanism
+  }
+});
+
+// Handle incoming signals
+transport.handleSignal(fromPeerId, signalData);
+```
 
 ### DataChannel Configuration
 
@@ -430,15 +406,18 @@ const reliableConfig = {
 
 ### NAT Traversal
 
-Users should configure STUN/TURN servers:
+Configure STUN/TURN servers via `rtcConfig`:
 
 ```typescript
-const rtcConfig = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'turn:your-turn-server.com', username: '...', credential: '...' }
-  ]
-};
+const transport = new WebRTCTransport(localPeerId, {
+  onSignal,
+  rtcConfig: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'turn:your-turn-server.com', username: '...', credential: '...' }
+    ]
+  }
+});
 ```
 
 ## Testing Support
@@ -448,22 +427,56 @@ const rtcConfig = {
 In-memory transport for deterministic testing:
 
 ```typescript
-const transport = new LocalTransport({
+const [t1, t2] = createLocalTransportGroup(['player-1', 'player-2'], {
   latency: 50,        // Simulated one-way latency (ms)
   jitter: 10,         // Random variation (ms)
   packetLoss: 0.01    // 1% packet loss
 });
 ```
 
-### Determinism Verification
-
-Run same inputs on two separate game instances, compare final state hashes. Useful for finding non-determinism bugs.
-
-### Desync Injection
-
-Force a desync to test recovery:
+### Test Utilities
 
 ```typescript
-session.injectDesync(playerId);  // Corrupts one player's state
-// Verify desync is detected and recovered
+import { TestGame, createTestSession, flushAllTransports } from 'rollback-netcode';
+
+// Create test sessions with linked transports
+const host = createTestSession({ transport: t1 });
+const client = createTestSession({ transport: t2 });
+
+// Simulate ticks
+host.session.tick(input);
+client.session.tick(input);
+flushAllTransports([t1, t2]);
+
+// Verify state matches
+assert(host.game.hash() === client.game.hash());
+```
+
+### Determinism Verification
+
+Run identical inputs on two separate game instances and compare final state hashes. Useful for finding non-determinism bugs in game logic.
+
+## File Organization
+
+```
+src/
+  index.ts              # Public API exports
+  types.ts              # Core type definitions
+  session/
+    session.ts          # Session manager
+    topology.ts         # Star/Mesh topology strategies
+    player-manager.ts   # Player tracking
+    message-router.ts   # Message dispatching
+  rollback/
+    engine.ts           # Rollback engine
+    snapshot-buffer.ts  # Ring buffer for snapshots
+    input-buffer.ts     # Per-player input tracking
+  transport/
+    adapter.ts          # Transport interface
+    webrtc.ts           # WebRTC implementation
+    local.ts            # Local/mock transport
+    transforming.ts     # Compression/segmentation wrapper
+  protocol/
+    messages.ts         # Message type definitions
+    encoding.ts         # Binary encoding/decoding
 ```
