@@ -1331,21 +1331,32 @@ export class Session {
 
 	/**
 	 * Maybe broadcast hash for desync detection.
+	 * Note: engine.currentTick is the NEXT tick to process, so we broadcast
+	 * the hash for currentTick - 1 (the tick we just completed).
 	 */
 	private maybeBroadcastHash(): void {
 		const currentTick = this.engine.currentTick;
+		// The tick we just processed and have a snapshot for
+		const completedTick = asTick(currentTick - 1);
 
-		if (currentTick - this.lastHashBroadcastTick >= this.config.hashInterval) {
-			this.lastHashBroadcastTick = currentTick;
+		if (
+			completedTick - this.lastHashBroadcastTick >=
+			this.config.hashInterval
+		) {
+			this.lastHashBroadcastTick = completedTick;
 
 			const hash = this.engine.getCurrentHash();
-			const hashMsg = createHash(this.localPlayerId, currentTick, hash);
+			const hashMsg = createHash(this.localPlayerId, completedTick, hash);
 
 			// Host-authority in mesh: guests send to host only, host collects
 			if (this.desyncManager.isHostAuthority) {
 				if (this._isHost) {
 					// Host records own hash and checks for desync
-					this.recordHashAndCheckDesync(currentTick, this.localPlayerId, hash);
+					this.recordHashAndCheckDesync(
+						completedTick,
+						this.localPlayerId,
+						hash,
+					);
 				} else {
 					// Guest sends hash to host only
 					this.sendToHost(hashMsg);
