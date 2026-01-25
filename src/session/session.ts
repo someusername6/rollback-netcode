@@ -832,19 +832,18 @@ export class Session {
 	/**
 	 * Update session state and emit event.
 	 * Validates that the transition is allowed by the state machine.
+	 * @throws Error if the transition is not valid
 	 */
 	private setState(newState: SessionState): void {
 		const oldState = this._state;
 		if (oldState === newState) return;
 
-		// Validate transition
+		// Validate transition - fail fast on invalid transitions
 		const validNextStates = Session.VALID_TRANSITIONS.get(oldState);
 		if (!validNextStates?.has(newState)) {
-			this.debug.warn("Invalid state transition attempted", {
-				from: SessionState[oldState],
-				to: SessionState[newState],
-			});
-			// Still allow the transition for robustness, but log a warning
+			throw new Error(
+				`Invalid state transition: ${SessionState[oldState]} → ${SessionState[newState]}`,
+			);
 		}
 
 		this._state = newState;

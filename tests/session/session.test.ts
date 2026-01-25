@@ -687,4 +687,57 @@ describe("Session", () => {
 			);
 		});
 	});
+
+	describe("state machine", () => {
+		it("should throw on invalid state transition", async () => {
+			const transport = new LocalTransport("host");
+			const game = new TestGame();
+			const session = createSession({ game, transport });
+
+			await session.createRoom();
+			assert.strictEqual(session.state, SessionState.Lobby);
+
+			// Try to trigger an invalid transition by calling setState directly
+			// Lobby -> Paused is not a valid transition
+			assert.throws(
+				() => {
+					(session as any).setState(SessionState.Paused);
+				},
+				{
+					message: /Invalid state transition: Lobby → Paused/,
+				},
+			);
+
+			// State should remain unchanged
+			assert.strictEqual(session.state, SessionState.Lobby);
+
+			session.destroy();
+		});
+
+		it("should allow valid state transitions", async () => {
+			const transport = new LocalTransport("host");
+			const game = new TestGame();
+			const session = createSession({ game, transport });
+
+			// Disconnected -> Lobby (via createRoom)
+			await session.createRoom();
+			assert.strictEqual(session.state, SessionState.Lobby);
+
+			// Lobby -> Playing (via start)
+			session.start();
+			assert.strictEqual(session.state, SessionState.Playing);
+
+			// Playing -> Paused (via pause)
+			session.pause();
+			assert.strictEqual(session.state, SessionState.Paused);
+
+			// Paused -> Playing (via resume)
+			session.resume();
+			assert.strictEqual(session.state, SessionState.Playing);
+
+			// Playing -> Disconnected (via destroy)
+			session.destroy();
+			assert.strictEqual(session.state, SessionState.Disconnected);
+		});
+	});
 });
