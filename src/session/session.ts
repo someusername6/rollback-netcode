@@ -1405,6 +1405,15 @@ export class Session {
 			// Clear join event tracking so if player rejoins later, we emit again
 			this.emittedJoinEvents.delete(message.playerId);
 			this.emit("playerLeft", player);
+
+			// In Star topology, host must relay PlayerLeft to other peers
+			// (similar to how PlayerJoined is broadcast)
+			if (this._isHost && this.config.topology === Topology.Star) {
+				this.broadcast(
+					createPlayerLeft(message.playerId, message.leaveTick),
+					true,
+				);
+			}
 		}
 	}
 

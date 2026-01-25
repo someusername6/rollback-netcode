@@ -648,4 +648,227 @@ describe("Mid-game join", () => {
     guest1Session.destroy();
     guest2Session.destroy();
   });
+
+  it("should handle player disconnect during active gameplay", async () => {
+    // This test verifies that when a player disconnects mid-game,
+    // the remaining players continue to function correctly and
+    // maintain synchronized state.
+
+    // Setup host
+    const hostGame = new MultiPlayerGame();
+    const hostTransport = new LocalTransport("host");
+    const hostSession = createSession({
+      game: hostGame,
+      transport: hostTransport,
+    });
+
+    const hostLeftEvents: string[] = [];
+    hostSession.on("playerJoined", (info) => {
+      hostGame.addPlayer(info.id);
+    });
+    hostSession.on("playerLeft", (info) => {
+      hostLeftEvents.push(info.id);
+      hostGame.removePlayer(info.id);
+    });
+
+    await hostSession.createRoom();
+    hostGame.addPlayer("host", 100, 100);
+    hostSession.start();
+
+    // Setup guest1
+    const guest1Game = new MultiPlayerGame();
+    const guest1Transport = new LocalTransport("guest1");
+    const guest1Session = createSession({
+      game: guest1Game,
+      transport: guest1Transport,
+    });
+
+    guest1Session.on("playerJoined", (info) => {
+      guest1Game.addPlayer(info.id);
+    });
+    guest1Session.on("playerLeft", (info) => {
+      guest1Game.removePlayer(info.id);
+    });
+
+    LocalTransport.link(hostTransport, guest1Transport);
+    await guest1Session.joinRoom("room", "host");
+    flushTransports([hostTransport, guest1Transport]);
+
+    // Setup guest2
+    const guest2Game = new MultiPlayerGame();
+    const guest2Transport = new LocalTransport("guest2");
+    const guest2Session = createSession({
+      game: guest2Game,
+      transport: guest2Transport,
+    });
+
+    guest2Session.on("playerJoined", (info) => {
+      guest2Game.addPlayer(info.id);
+    });
+    guest2Session.on("playerLeft", (info) => {
+      guest2Game.removePlayer(info.id);
+    });
+
+    LocalTransport.link(hostTransport, guest2Transport);
+    await guest2Session.joinRoom("room", "host");
+    flushTransports([hostTransport, guest1Transport, guest2Transport]);
+
+    // All three players should be in the game
+    assert.strictEqual(hostGame.players.size, 3, "Host should have 3 players");
+    assert.strictEqual(guest1Game.players.size, 3, "Guest1 should have 3 players");
+    assert.strictEqual(guest2Game.players.size, 3, "Guest2 should have 3 players");
+
+    // Run game for several ticks with all players sending inputs
+    for (let i = 0; i < 20; i++) {
+      // Host moves right
+      hostSession.tick(new Uint8Array([129, 128]));
+      // Guest1 moves up
+      guest1Session.tick(new Uint8Array([128, 127]));
+      // Guest2 moves left
+      guest2Session.tick(new Uint8Array([127, 128]));
+      flushTransports([hostTransport, guest1Transport, guest2Transport]);
+    }
+
+    // Verify all players have moved
+    const hostPosOnHost = hostGame.players.get("host");
+    assert.ok(hostPosOnHost && hostPosOnHost.x > 100, "Host should have moved right");
+
+    // Guest1 disconnects mid-game
+    guest1Session.leaveRoom();
+    flushTransports([hostTransport, guest1Transport, guest2Transport]);
+
+    // Process a few more ticks to propagate the leave
+    for (let i = 0; i < 5; i++) {
+      hostSession.tick(new Uint8Array([129, 128]));
+      guest2Session.tick(new Uint8Array([127, 128]));
+      flushTransports([hostTransport, guest2Transport]);
+    }
+
+    // Verify guest1 left event was received
+    assert.ok(
+      hostLeftEvents.includes("guest1"),
+      "Host should have received playerLeft event for guest1"
+    );
+
+    // Host and guest2 should now only have 2 players each
+    assert.strictEqual(
+      hostGame.players.size,
+      2,
+      "Host should have 2 players after guest1 left"
+    );
+    assert.strictEqual(
+      guest2Game.players.size,
+      2,
+      "Guest2 should have 2 players after guest1 left"
+    );
+
+    // Continue gameplay with remaining players
+    for (let i = 0; i < 20; i++) {
+      hostSession.tick(new Uint8Array([129, 128]));
+      guest2Session.tick(new Uint8Array([127, 128]));
+      flushTransports([hostTransport, guest2Transport]);
+    }
+
+    // Verify host and guest2 are still in sync
+    assert.strictEqual(
+      hostGame.hash(),
+      guest2Game.hash(),
+      "Host and Guest2 should have matching state after guest1 disconnect"
+    );
+
+    // Cleanup
+    hostSession.destroy();
+    guest1Session.destroy();
+    guest2Session.destroy();
+  });
+
+  it("should continue gameplay correctly after multiple players disconnect", async () => {
+    // Test that gameplay continues correctly even when multiple players leave
+
+    const games: MultiPlayerGame[] = [];
+    const transports: LocalTransport[] = [];
+    const sessions: ReturnType<typeof createSession>[] = [];
+
+    // Create host
+    const hostGame = new MultiPlayerGame();
+    const hostTransport = new LocalTransport("host");
+    const hostSession = createSession({
+      game: hostGame,
+      transport: hostTransport,
+    });
+
+    hostSession.on("playerJoined", (info) => hostGame.addPlayer(info.id));
+    hostSession.on("playerLeft", (info) => hostGame.removePlayer(info.id));
+
+    games.push(hostGame);
+    transports.push(hostTransport);
+    sessions.push(hostSession);
+
+    await hostSession.createRoom();
+    hostGame.addPlayer("host", 0, 0);
+    hostSession.start();
+
+    // Create 3 guests - must join one at a time with flush between each
+    // to ensure StateSync is delivered before next player joins
+    for (let i = 1; i <= 3; i++) {
+      const guestGame = new MultiPlayerGame();
+      const guestTransport = new LocalTransport(`guest${i}`);
+      const guestSession = createSession({
+        game: guestGame,
+        transport: guestTransport,
+      });
+
+      guestSession.on("playerJoined", (info) => guestGame.addPlayer(info.id));
+      guestSession.on("playerLeft", (info) => guestGame.removePlayer(info.id));
+
+      LocalTransport.link(hostTransport, guestTransport);
+      await guestSession.joinRoom("room", "host");
+
+      games.push(guestGame);
+      transports.push(guestTransport);
+      sessions.push(guestSession);
+
+      // Flush after each join to ensure StateSync is delivered before next player
+      flushTransports(transports);
+    }
+
+    // All 4 players should be in the game
+    for (const game of games) {
+      assert.strictEqual(game.players.size, 4, "All games should have 4 players");
+    }
+
+    // Run some ticks
+    for (let i = 0; i < 10; i++) {
+      for (const session of sessions) {
+        session.tick(new Uint8Array([128, 128]));
+      }
+      flushTransports(transports);
+    }
+
+    // Guest1 and Guest2 disconnect
+    sessions[1]!.leaveRoom();
+    sessions[2]!.leaveRoom();
+    flushTransports(transports);
+
+    // Run more ticks with remaining players (host and guest3)
+    for (let i = 0; i < 10; i++) {
+      sessions[0]!.tick(new Uint8Array([129, 128])); // host moves right
+      sessions[3]!.tick(new Uint8Array([127, 128])); // guest3 moves left
+      flushTransports([transports[0]!, transports[3]!]);
+    }
+
+    // Host and guest3 should have 2 players and be in sync
+    assert.strictEqual(games[0]!.players.size, 2, "Host should have 2 players");
+    assert.strictEqual(games[3]!.players.size, 2, "Guest3 should have 2 players");
+    assert.strictEqual(
+      games[0]!.hash(),
+      games[3]!.hash(),
+      "Host and Guest3 should be in sync after multiple disconnects"
+    );
+
+    // Cleanup
+    for (const session of sessions) {
+      session.destroy();
+    }
+  });
 });

@@ -430,10 +430,12 @@ export class LocalTransport implements TransportAdapter {
 
 	/**
 	 * Deliver a single message to its target peer.
+	 * Messages are delivered regardless of current connection state, simulating
+	 * real networks where messages in flight can arrive after disconnect.
 	 */
 	private deliverMessage(pending: PendingMessage): void {
 		const peer = this.linkedTransports.get(pending.targetPeerId);
-		if (peer?._connectedPeers.has(this.localPeerId)) {
+		if (peer) {
 			peer.onMessage?.(this.localPeerId, pending.message);
 		}
 	}
