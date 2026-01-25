@@ -118,8 +118,10 @@ function generateRoomId(): string {
 	return id;
 }
 
-// Type alias for event handler functions
-type EventHandler = (...args: never[]) => void;
+// Type alias for event handler storage. Uses unknown[] because different events
+// have different signatures. Type safety is enforced at the public API level
+// (on/off/emit methods) rather than at the storage level.
+type EventHandler = (...args: unknown[]) => void;
 
 /**
  * Session manager that coordinates the rollback engine with network transport.
@@ -796,7 +798,7 @@ export class Session {
 		if (handlers) {
 			for (const handler of handlers) {
 				try {
-					(handler as (...args: Parameters<SessionEvents[E]>) => void)(...args);
+					handler(...args);
 				} catch (handlerError) {
 					// Avoid infinite recursion: don't emit error events for errors in error handlers
 					if (event !== "error") {
