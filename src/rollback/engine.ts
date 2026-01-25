@@ -7,13 +7,19 @@
 
 import type {
 	Game,
+	GameOperation,
 	InputPredictor,
 	PlayerId,
 	PlayerTimeline,
 	Tick,
 	TickResult,
 } from "../types.js";
-import { DEFAULT_INPUT_PREDICTOR, RollbackError, asTick } from "../types.js";
+import {
+	DEFAULT_INPUT_PREDICTOR,
+	GameError,
+	RollbackError,
+	asTick,
+} from "../types.js";
 import { InputBuffer } from "./input-buffer.js";
 import { SnapshotBuffer } from "./snapshot-buffer.js";
 
@@ -201,9 +207,10 @@ export class RollbackEngine {
 	 */
 	saveInitialSnapshot(): void {
 		if (!this.snapshotBuffer.has(asTick(-1))) {
-			const state = this.game.serialize();
-			const hash = this.game.hash();
-			this.snapshotBuffer.save(asTick(-1), state, hash);
+			const tick = asTick(-1);
+			const state = this.gameSerialize(tick);
+			const hash = this.gameHash(tick);
+			this.snapshotBuffer.save(tick, state, hash);
 		}
 	}
 
@@ -247,11 +254,11 @@ export class RollbackEngine {
 		const inputs = this.gatherInputs(this._currentTick);
 
 		// Step the simulation
-		this.game.step(inputs);
+		this.gameStep(this._currentTick, inputs);
 
 		// Save snapshot
-		const state = this.game.serialize();
-		const hash = this.game.hash();
+		const state = this.gameSerialize(this._currentTick);
+		const hash = this.gameHash(this._currentTick);
 		this.snapshotBuffer.save(this._currentTick, state, hash);
 
 		// Update confirmed tick
@@ -340,7 +347,7 @@ export class RollbackEngine {
 		const ticksToResimulate = this._currentTick - resimulateFromTick;
 
 		// Restore game state
-		this.game.deserialize(snapshot.state);
+		this.gameDeserialize(actualRestoreTick, snapshot.state);
 
 		// Notify about rollback before resimulation
 		this.onRollback?.(actualRestoreTick);
@@ -356,11 +363,11 @@ export class RollbackEngine {
 			this.handlePlayerLifecycleAtTick(tickAsTick);
 
 			const inputs = this.gatherInputs(tickAsTick);
-			this.game.step(inputs);
+			this.gameStep(tickAsTick, inputs);
 
 			// Update snapshot
-			const state = this.game.serialize();
-			const hash = this.game.hash();
+			const state = this.gameSerialize(tickAsTick);
+			const hash = this.gameHash(tickAsTick);
 			this.snapshotBuffer.save(tickAsTick, state, hash);
 		}
 
@@ -468,7 +475,7 @@ export class RollbackEngine {
 	 * Get the current game hash.
 	 */
 	getCurrentHash(): number {
-		return this.game.hash();
+		return this.gameHash(this._currentTick);
 	}
 
 	/**
@@ -497,7 +504,7 @@ export class RollbackEngine {
 
 		return {
 			tick: this._currentTick,
-			state: this.game.serialize(),
+			state: this.gameSerialize(this._currentTick),
 			playerTimeline,
 		};
 	}
@@ -516,7 +523,7 @@ export class RollbackEngine {
 		playerTimeline: PlayerTimeline,
 	): void {
 		// Restore game state
-		this.game.deserialize(state);
+		this.gameDeserialize(tick, state);
 
 		// Clear buffers
 		this.snapshotBuffer.clear();
@@ -539,8 +546,9 @@ export class RollbackEngine {
 
 		// Save initial snapshot at tick - 1 (state before any simulation)
 		// This is needed so we can rollback tick 0 if there's a misprediction
-		const hash = this.game.hash();
-		this.snapshotBuffer.save(asTick(tick - 1), state, hash);
+		const snapshotTick = asTick(tick - 1);
+		const hash = this.gameHash(snapshotTick);
+		this.snapshotBuffer.save(snapshotTick, state, hash);
 
 		// Set tick counters - currentTick is the next tick to simulate
 		this._currentTick = tick;
@@ -613,5 +621,61 @@ export class RollbackEngine {
 
 		// Re-add local player
 		this.inputBuffer.addPlayer(this.localPlayerId, asTick(0));
+	}
+
+	// =========================================================================
+	// Game operation wrappers with error handling
+	// =========================================================================
+
+	/**
+	 * Wrap a game operation with error handling.
+	 * Catches any error and re-throws it wrapped in a GameError with context.
+	 */
+	private wrapGameOperation<T>(
+		operation: GameOperation,
+		tick: Tick,
+		fn: () => T,
+	): T {
+		try {
+			return fn();
+		} catch (error) {
+			throw new GameError(
+				operation,
+				tick,
+				error instanceof Error ? error : new Error(String(error)),
+			);
+		}
+	}
+
+	/**
+	 * Call game.step() with error wrapping.
+	 */
+	private gameStep(tick: Tick, inputs: Map<PlayerId, Uint8Array>): void {
+		this.wrapGameOperation("step", tick, () => this.game.step(inputs));
+	}
+
+	/**
+	 * Call game.serialize() with error wrapping.
+	 */
+	private gameSerialize(tick: Tick): Uint8Array {
+		return this.wrapGameOperation("serialize", tick, () =>
+			this.game.serialize(),
+		);
+	}
+
+	/**
+	 * Call game.deserialize() with error wrapping.
+	 */
+	private gameDeserialize(tick: Tick, state: Uint8Array): void {
+		this.wrapGameOperation("deserialize", tick, () =>
+			this.game.deserialize(state),
+		);
+	}
+
+	/**
+	 * Call game.hash() with error wrapping.
+	 */
+	private gameHash(tick: Tick): number {
+		return this.wrapGameOperation("hash", tick, () => this.game.hash());
 	}
 }

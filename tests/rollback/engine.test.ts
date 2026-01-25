@@ -1,6 +1,6 @@
 import assert from "node:assert";
 import { beforeEach, describe, it } from "node:test";
-import { type Game, type PlayerId, asPlayerId, asTick } from "../../src/types.js";
+import { type Game, type PlayerId, asPlayerId, asTick, GameError } from "../../src/types.js";
 import { RollbackEngine } from "../../src/rollback/engine.js";
 import { TestGame } from "../utils/test-game.js";
 
@@ -600,7 +600,7 @@ describe("RollbackEngine", () => {
 			}
 		}
 
-		it("should propagate error when game.step() throws", () => {
+		it("should wrap error in GameError when game.step() throws", () => {
 			const throwingGame = new ThrowingGame();
 			const throwingEngine = new RollbackEngine({
 				game: throwingGame,
@@ -610,16 +610,19 @@ describe("RollbackEngine", () => {
 			throwingEngine.setLocalInput(asTick(0), new Uint8Array([138]));
 			throwingGame.throwOnStep = true;
 
-			// BUG: Currently the error propagates uncaught
-			// After fix, should either catch and emit error event, or wrap in GameError
-			assert.throws(
-				() => throwingEngine.tick(),
-				/step error/,
-				"game.step() error should propagate (current behavior)",
-			);
+			try {
+				throwingEngine.tick();
+				assert.fail("Expected GameError to be thrown");
+			} catch (error) {
+				assert.ok(error instanceof GameError, "Error should be a GameError");
+				assert.strictEqual(error.operation, "step", "Operation should be 'step'");
+				assert.strictEqual(error.tick, 0, "Tick should be 0");
+				assert.ok(error.cause instanceof Error, "Should have original error as cause");
+				assert.ok(error.message.includes("step error"), "Message should include original error");
+			}
 		});
 
-		it("should propagate error when game.serialize() throws", () => {
+		it("should wrap error in GameError when game.serialize() throws", () => {
 			const throwingGame = new ThrowingGame();
 			const throwingEngine = new RollbackEngine({
 				game: throwingGame,
@@ -629,15 +632,20 @@ describe("RollbackEngine", () => {
 			throwingEngine.setLocalInput(asTick(0), new Uint8Array([138]));
 			throwingGame.throwOnSerialize = true;
 
-			// BUG: Currently the error propagates uncaught
-			assert.throws(
-				() => throwingEngine.tick(),
-				/serialize error/,
-				"game.serialize() error should propagate (current behavior)",
-			);
+			try {
+				throwingEngine.tick();
+				assert.fail("Expected GameError to be thrown");
+			} catch (error) {
+				assert.ok(error instanceof GameError, "Error should be a GameError");
+				assert.strictEqual(error.operation, "serialize", "Operation should be 'serialize'");
+				// First tick() saves initial snapshot at tick -1 before processing tick 0
+				assert.strictEqual(error.tick, -1, "Tick should be -1 (initial snapshot)");
+				assert.ok(error.cause instanceof Error, "Should have original error as cause");
+				assert.ok(error.message.includes("serialize error"), "Message should include original error");
+			}
 		});
 
-		it("should propagate error when game.hash() throws", () => {
+		it("should wrap error in GameError when game.hash() throws", () => {
 			const throwingGame = new ThrowingGame();
 			const throwingEngine = new RollbackEngine({
 				game: throwingGame,
@@ -647,15 +655,20 @@ describe("RollbackEngine", () => {
 			throwingEngine.setLocalInput(asTick(0), new Uint8Array([138]));
 			throwingGame.throwOnHash = true;
 
-			// BUG: Currently the error propagates uncaught
-			assert.throws(
-				() => throwingEngine.tick(),
-				/hash error/,
-				"game.hash() error should propagate (current behavior)",
-			);
+			try {
+				throwingEngine.tick();
+				assert.fail("Expected GameError to be thrown");
+			} catch (error) {
+				assert.ok(error instanceof GameError, "Error should be a GameError");
+				assert.strictEqual(error.operation, "hash", "Operation should be 'hash'");
+				// First tick() saves initial snapshot at tick -1 before processing tick 0
+				assert.strictEqual(error.tick, -1, "Tick should be -1 (initial snapshot)");
+				assert.ok(error.cause instanceof Error, "Should have original error as cause");
+				assert.ok(error.message.includes("hash error"), "Message should include original error");
+			}
 		});
 
-		it("should propagate error when game.deserialize() throws during rollback", () => {
+		it("should wrap error in GameError when game.deserialize() throws during rollback", () => {
 			const throwingGame = new ThrowingGame();
 			const throwingEngine = new RollbackEngine({
 				game: throwingGame,
@@ -682,15 +695,20 @@ describe("RollbackEngine", () => {
 
 			throwingEngine.setLocalInput(asTick(2), new Uint8Array([128]));
 
-			// BUG: Currently the error propagates uncaught during rollback
-			assert.throws(
-				() => throwingEngine.tick(),
-				/deserialize error/,
-				"game.deserialize() error should propagate (current behavior)",
-			);
+			try {
+				throwingEngine.tick();
+				assert.fail("Expected GameError to be thrown");
+			} catch (error) {
+				assert.ok(error instanceof GameError, "Error should be a GameError");
+				assert.strictEqual(error.operation, "deserialize", "Operation should be 'deserialize'");
+				// Deserialize happens at tick 0 (the rollback restore tick)
+				assert.strictEqual(error.tick, 0, "Tick should be the rollback restore tick");
+				assert.ok(error.cause instanceof Error, "Should have original error as cause");
+				assert.ok(error.message.includes("deserialize error"), "Message should include original error");
+			}
 		});
 
-		it("should propagate error when game.step() throws during resimulation", () => {
+		it("should wrap error in GameError when game.step() throws during resimulation", () => {
 			const throwingGame = new ThrowingGame();
 			const throwingEngine = new RollbackEngine({
 				game: throwingGame,
@@ -717,12 +735,17 @@ describe("RollbackEngine", () => {
 
 			throwingEngine.setLocalInput(asTick(2), new Uint8Array([128]));
 
-			// BUG: Currently the error propagates uncaught during resimulation
-			assert.throws(
-				() => throwingEngine.tick(),
-				/step error/,
-				"game.step() error during resimulation should propagate (current behavior)",
-			);
+			try {
+				throwingEngine.tick();
+				assert.fail("Expected GameError to be thrown");
+			} catch (error) {
+				assert.ok(error instanceof GameError, "Error should be a GameError");
+				assert.strictEqual(error.operation, "step", "Operation should be 'step'");
+				// Step during resimulation happens at tick 1 (the first resimulated tick)
+				assert.strictEqual(error.tick, 1, "Tick should be the resimulation tick");
+				assert.ok(error.cause instanceof Error, "Should have original error as cause");
+				assert.ok(error.message.includes("step error"), "Message should include original error");
+			}
 		});
 	});
 

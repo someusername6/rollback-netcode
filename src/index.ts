@@ -89,6 +89,7 @@ export type { Message } from "./protocol/messages.js";
 // Core types (interfaces and type aliases)
 export type {
 	Game,
+	GameOperation,
 	PlayerId,
 	Tick,
 	TickResult,
@@ -121,6 +122,7 @@ export {
 	MAX_PLAYERS_LIMIT,
 	RollbackError,
 	ValidationError,
+	GameError,
 	validateSessionConfig,
 } from "./types.js";
 

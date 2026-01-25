@@ -557,6 +557,31 @@ export class ValidationError extends Error {
 	}
 }
 
+/**
+ * Game operations that can fail.
+ */
+export type GameOperation = "step" | "serialize" | "deserialize" | "hash";
+
+/**
+ * Error thrown when a game callback fails.
+ * Wraps the original error with context about which operation failed and at which tick.
+ */
+export class GameError extends Error {
+	constructor(
+		/** The game operation that failed */
+		public readonly operation: GameOperation,
+		/** The tick at which the error occurred */
+		public readonly tick: Tick,
+		/** The original error from the game */
+		cause: Error,
+	) {
+		super(`Game ${operation}() failed at tick ${tick}: ${cause.message}`, {
+			cause,
+		});
+		this.name = "GameError";
+	}
+}
+
 // =============================================================================
 // Events
 // =============================================================================
