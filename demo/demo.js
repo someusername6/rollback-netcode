@@ -9368,7 +9368,6 @@ var DemoManager = class {
    */
   tick() {
     const input = this.getInput();
-    const now = performance.now();
     this.tickCounter++;
     const shouldPing = this.tickCounter % KEEPALIVE_INTERVAL_TICKS === 0;
     if (this.simulatedLatency === 0) {
@@ -9376,7 +9375,7 @@ var DemoManager = class {
       for (const entry of this.players.values()) {
         const playerInput = entry.id === this.activePlayerId ? input : new Uint8Array([0]);
         const result = entry.session.tick(playerInput);
-        this.trackRollback(entry, result, now);
+        this.trackRollback(entry, result);
         this.flushAllTransportsOnce();
       }
       if (shouldPing) {
@@ -9393,14 +9392,14 @@ var DemoManager = class {
       for (const entry of this.players.values()) {
         const playerInput = entry.id === this.activePlayerId ? input : new Uint8Array([0]);
         const result = entry.session.tick(playerInput);
-        this.trackRollback(entry, result, now);
+        this.trackRollback(entry, result);
       }
     }
   }
   /**
    * Track rollback events and update stats.
    */
-  trackRollback(entry, result, _now) {
+  trackRollback(entry, result) {
     if (result.rolledBack) {
       entry.rollbackCount++;
     }
@@ -9436,21 +9435,22 @@ var DemoManager = class {
   }
   /**
    * Update the stats display for a player.
+   * Always shows two lines: RTT and Rollbacks.
    */
   updateStats(entry) {
     const hostEntry = this.getHostEntry();
     const isHost = hostEntry?.id === entry.id;
-    const parts = [];
-    if (!isHost && hostEntry) {
+    let rttText;
+    if (isHost) {
+      rttText = "RTT: -";
+    } else if (hostEntry) {
       const rtt = entry.session.getRtt(hostEntry.id);
-      if (rtt > 0) {
-        parts.push(`RTT: ${Math.round(rtt)}ms`);
-      }
+      rttText = rtt > 0 ? `RTT: ${Math.round(rtt)}ms` : "RTT: -";
+    } else {
+      rttText = "RTT: -";
     }
-    if (entry.rollbackCount > 0) {
-      parts.push(`Rollbacks: ${entry.rollbackCount}`);
-    }
-    entry.statsEl.textContent = parts.join(" | ");
+    const rollbackText = `Rollbacks: ${entry.rollbackCount}`;
+    entry.statsEl.innerHTML = `${rttText}<br>${rollbackText}`;
   }
 };
 document.addEventListener("DOMContentLoaded", () => {

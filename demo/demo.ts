@@ -598,7 +598,6 @@ class DemoManager {
    */
   private tick(): void {
     const input = this.getInput();
-    const now = performance.now();
     this.tickCounter++;
 
     // Trigger keepalive pings periodically for RTT measurement
@@ -611,7 +610,7 @@ class DemoManager {
       for (const entry of this.players.values()) {
         const playerInput = entry.id === this.activePlayerId ? input : new Uint8Array([0]);
         const result = entry.session.tick(playerInput);
-        this.trackRollback(entry, result, now);
+        this.trackRollback(entry, result);
         this.flushAllTransportsOnce();
       }
 
@@ -636,7 +635,7 @@ class DemoManager {
       for (const entry of this.players.values()) {
         const playerInput = entry.id === this.activePlayerId ? input : new Uint8Array([0]);
         const result = entry.session.tick(playerInput);
-        this.trackRollback(entry, result, now);
+        this.trackRollback(entry, result);
       }
     }
   }
@@ -646,8 +645,7 @@ class DemoManager {
    */
   private trackRollback(
     entry: PlayerEntry,
-    result: { rolledBack: boolean; rollbackTicks?: number },
-    _now: number
+    result: { rolledBack: boolean; rollbackTicks?: number }
   ): void {
     if (result.rolledBack) {
       entry.rollbackCount++;
@@ -690,27 +688,27 @@ class DemoManager {
 
   /**
    * Update the stats display for a player.
+   * Always shows two lines: RTT and Rollbacks.
    */
   private updateStats(entry: PlayerEntry): void {
     const hostEntry = this.getHostEntry();
     const isHost = hostEntry?.id === entry.id;
 
-    const parts: string[] = [];
-
-    // Show RTT to host (for non-host players)
-    if (!isHost && hostEntry) {
+    // Line 1: RTT (host shows "-", clients show actual RTT or "-" if not yet measured)
+    let rttText: string;
+    if (isHost) {
+      rttText = "RTT: -";
+    } else if (hostEntry) {
       const rtt = entry.session.getRtt(hostEntry.id);
-      if (rtt > 0) {
-        parts.push(`RTT: ${Math.round(rtt)}ms`);
-      }
+      rttText = rtt > 0 ? `RTT: ${Math.round(rtt)}ms` : "RTT: -";
+    } else {
+      rttText = "RTT: -";
     }
 
-    // Show rollback count
-    if (entry.rollbackCount > 0) {
-      parts.push(`Rollbacks: ${entry.rollbackCount}`);
-    }
+    // Line 2: Rollbacks (always show, even if 0)
+    const rollbackText = `Rollbacks: ${entry.rollbackCount}`;
 
-    entry.statsEl.textContent = parts.join(" | ");
+    entry.statsEl.innerHTML = `${rttText}<br>${rollbackText}`;
   }
 }
 

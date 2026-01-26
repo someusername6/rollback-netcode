@@ -87,8 +87,14 @@ header h1 a:hover {
   transition: background 0.2s;
 }
 
-.btn-primary:hover {
+.btn-primary:hover:not(:disabled) {
   background: #2980b9;
+}
+
+.btn-primary:disabled {
+  background: #555;
+  color: #888;
+  cursor: not-allowed;
 }
 
 .hint {
@@ -142,13 +148,13 @@ header h1 a:hover {
   padding: 10px 12px;
   background: #252540;
   border-bottom: 1px solid #333;
-  min-height: 52px; /* Fixed height to prevent layout jumps */
+  min-height: 68px; /* Fixed height for player name + 2-line stats */
 }
 
 .player-info {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 6px;
 }
 
 .player-name {
@@ -159,7 +165,8 @@ header h1 a:hover {
 .player-stats {
   font-size: 0.75rem;
   color: #888;
-  min-height: 1em; /* Reserve space even when empty */
+  line-height: 1.3;
+  height: 2.6em; /* Fixed height for 2 lines (2 * 1.3em line-height) */
 }
 
 .player-buttons {
