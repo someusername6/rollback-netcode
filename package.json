@@ -1,6 +1,6 @@
 {
   "name": "rollback-netcode",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "P2P rollback netcode library for browser-based multiplayer games",
   "type": "module",
   "main": "dist/index.js",
