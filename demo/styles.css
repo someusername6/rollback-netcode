@@ -19,26 +19,21 @@ body {
 
 header {
   text-align: center;
-  margin-bottom: 24px;
+  margin-bottom: 20px;
 }
 
 header h1 {
-  font-size: 2rem;
-  color: #fff;
-  margin-bottom: 8px;
-}
-
-header .subtitle {
+  font-size: 1.4rem;
   color: #888;
-  font-size: 0.95rem;
+  font-weight: 500;
 }
 
-header a {
+header h1 a {
   color: #3498db;
   text-decoration: none;
 }
 
-header a:hover {
+header h1 a:hover {
   text-decoration: underline;
 }
 
@@ -96,25 +91,11 @@ header a:hover {
   background: #2980b9;
 }
 
-.instructions {
-  background: #1a1a2e;
-  padding: 16px;
-  border-radius: 8px;
-  margin-bottom: 24px;
-  font-size: 0.9rem;
-  line-height: 1.6;
-}
-
-.instructions p {
-  margin-bottom: 8px;
-}
-
-.instructions p:last-child {
-  margin-bottom: 0;
-}
-
-.instructions strong {
-  color: #fff;
+.hint {
+  text-align: center;
+  color: #666;
+  font-size: 0.85rem;
+  margin-bottom: 20px;
 }
 
 .players-container {

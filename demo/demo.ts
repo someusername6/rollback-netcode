@@ -657,23 +657,11 @@ class DemoManager {
 
   /**
    * Update the stats display for a player.
-   * Shows rollback count and simulated latency (RTT).
    */
   private updateStats(entry: PlayerEntry): void {
-    const parts: string[] = [];
-
-    // Rollback count
-    if (entry.rollbackCount > 0) {
-      parts.push(`Rollbacks: ${entry.rollbackCount}`);
-    }
-
-    // Simulated latency (shown as RTT = 2x one-way latency)
-    if (this.simulatedLatency > 0) {
-      const rtt = this.simulatedLatency * 2;
-      parts.push(`RTT: ~${rtt}ms`);
-    }
-
-    entry.statsEl.textContent = parts.length > 0 ? parts.join(" | ") : "";
+    entry.statsEl.textContent = entry.rollbackCount > 0
+      ? `Rollbacks: ${entry.rollbackCount}`
+      : "";
   }
 }
 

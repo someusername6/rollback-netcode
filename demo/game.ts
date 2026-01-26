@@ -270,14 +270,15 @@ export class DotGame implements Game {
    * Used for testing desync detection.
    */
   induceDesync(): void {
-    // Move the first player by a random offset
-    const firstId = this.playerOrder[0];
-    if (firstId) {
-      const player = this.players.get(firstId);
-      if (player) {
-        player.x += 50;
-        player.y += 50;
-      }
+    // Add random offset to all players
+    for (const player of this.players.values()) {
+      const offsetX = Math.floor(Math.random() * 60) - 30; // -30 to +30
+      const offsetY = Math.floor(Math.random() * 60) - 30;
+      player.x += offsetX;
+      player.y += offsetY;
+      // Clamp to canvas bounds
+      player.x = Math.max(DOT_RADIUS, Math.min(CANVAS_WIDTH - DOT_RADIUS, player.x));
+      player.y = Math.max(DOT_RADIUS, Math.min(CANVAS_HEIGHT - DOT_RADIUS, player.y));
     }
   }
 }

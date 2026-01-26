@@ -9,10 +9,7 @@
 <body>
   <div class="container">
     <header>
-      <h1>Rollback Netcode Demo</h1>
-      <p class="subtitle">
-        Test the <a href="https://github.com/someusername6/rollback-netcode">rollback-netcode</a> library locally
-      </p>
+      <h1><a href="https://github.com/someusername6/rollback-netcode">rollback-netcode</a> demo</h1>
     </header>
 
     <div class="controls">
@@ -47,17 +44,7 @@
       <button id="add-player" class="btn-primary">Add Player</button>
     </div>
 
-    <div class="instructions">
-      <p>
-        <strong>Instructions:</strong>
-        Click "Add Player" to create players. Click a canvas to select it, then use arrow keys to move.
-        Each canvas shows the same world state from that player's perspective.
-      </p>
-      <p>
-        <strong>Induce Desync:</strong> Corrupts that player's local state to trigger desync detection.
-        <strong>Disconnect:</strong> Removes the player from the session.
-      </p>
-    </div>
+    <p class="hint">Click a canvas to select it, then use arrow keys to move.</p>
 
     <div id="players-container" class="players-container"></div>
   </div>

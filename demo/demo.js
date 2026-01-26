@@ -8899,13 +8899,13 @@ var DotGame = class {
    * Used for testing desync detection.
    */
   induceDesync() {
-    const firstId = this.playerOrder[0];
-    if (firstId) {
-      const player = this.players.get(firstId);
-      if (player) {
-        player.x += 50;
-        player.y += 50;
-      }
+    for (const player of this.players.values()) {
+      const offsetX = Math.floor(Math.random() * 60) - 30;
+      const offsetY = Math.floor(Math.random() * 60) - 30;
+      player.x += offsetX;
+      player.y += offsetY;
+      player.x = Math.max(DOT_RADIUS, Math.min(CANVAS_WIDTH - DOT_RADIUS, player.x));
+      player.y = Math.max(DOT_RADIUS, Math.min(CANVAS_HEIGHT - DOT_RADIUS, player.y));
     }
   }
 };
@@ -9375,18 +9375,9 @@ var DemoManager = class {
   }
   /**
    * Update the stats display for a player.
-   * Shows rollback count and simulated latency (RTT).
    */
   updateStats(entry) {
-    const parts = [];
-    if (entry.rollbackCount > 0) {
-      parts.push(`Rollbacks: ${entry.rollbackCount}`);
-    }
-    if (this.simulatedLatency > 0) {
-      const rtt = this.simulatedLatency * 2;
-      parts.push(`RTT: ~${rtt}ms`);
-    }
-    entry.statsEl.textContent = parts.length > 0 ? parts.join(" | ") : "";
+    entry.statsEl.textContent = entry.rollbackCount > 0 ? `Rollbacks: ${entry.rollbackCount}` : "";
   }
 };
 document.addEventListener("DOMContentLoaded", () => {
