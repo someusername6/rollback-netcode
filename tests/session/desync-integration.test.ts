@@ -1401,4 +1401,299 @@ describe("Desync Detection Integration", () => {
 			}
 		});
 	});
+
+	describe("desync recovery with simulated latency", () => {
+		/**
+		 * This test verifies that multiple rapid desyncs with network latency
+		 * don't cause the game to deadlock at max speculation.
+		 *
+		 * Previously, this scenario would cause a deadlock because:
+		 * 1. When a player requested sync, only that player received the sync message
+		 * 2. With latency, by the time sync arrived, the synced player's tick was
+		 *    behind other players by more than the input redundancy window
+		 * 3. The synced player couldn't get inputs from other players (they were too old)
+		 * 4. All players would hit max speculation and freeze
+		 *
+		 * The fix broadcasts sync to ALL players, ensuring everyone resets to
+		 * the same tick and eliminating tick divergence.
+		 */
+		it("should recover from multiple rapid desyncs with latency (Mesh + Peer)", async () => {
+			// Create transports WITH latency - this is key to reproducing the bug
+			const transports = createLocalTransportGroup(["host", "p2", "p3"], {
+				latency: 50, // 50ms one-way latency (100ms round trip)
+			});
+			const hostTransport = getTransport(transports, "host");
+			const p2Transport = getTransport(transports, "p2");
+			const p3Transport = getTransport(transports, "p3");
+
+			const hostGame = new TestGame();
+			const p2Game = new TestGame();
+			const p3Game = new TestGame();
+
+			const config = {
+				topology: Topology.Mesh,
+				desyncAuthority: DesyncAuthority.Peer,
+				hashInterval: 5,
+				inputDelayTicks: 0,
+				maxSpeculationTicks: 60,
+			};
+
+			const hostSession = createSession({
+				game: hostGame,
+				transport: hostTransport,
+				config,
+			});
+			const p2Session = createSession({
+				game: p2Game,
+				transport: p2Transport,
+				config,
+			});
+			const p3Session = createSession({
+				game: p3Game,
+				transport: p3Transport,
+				config,
+			});
+
+			let desyncCount = 0;
+			hostSession.on("desync", () => desyncCount++);
+			p2Session.on("desync", () => desyncCount++);
+			p3Session.on("desync", () => desyncCount++);
+
+			// Set up session
+			await hostSession.createRoom();
+			await p2Session.joinRoom(hostSession.roomId!, "host");
+			flushAll(hostTransport, p2Transport, p3Transport);
+			await p3Session.joinRoom(hostSession.roomId!, "host");
+			flushAll(hostTransport, p2Transport, p3Transport);
+
+			// Establish peer-to-peer connections for Mesh
+			await p2Transport.connect("p3");
+			await p3Transport.connect("p2");
+			flushAll(hostTransport, p2Transport, p3Transport);
+
+			hostSession.start();
+			flushAll(hostTransport, p2Transport, p3Transport);
+
+			const TICK_MS = 16; // ~60 FPS
+
+			// Helper to run ticks with time-based delivery (simulates real latency)
+			const runTicksWithLatency = (count: number) => {
+				for (let i = 0; i < count; i++) {
+					// Tick transports first (delivers messages based on simulated time)
+					hostTransport.tick(TICK_MS);
+					p2Transport.tick(TICK_MS);
+					p3Transport.tick(TICK_MS);
+
+					// Then tick sessions
+					hostSession.tick(NEUTRAL_INPUT);
+					p2Session.tick(NEUTRAL_INPUT);
+					p3Session.tick(NEUTRAL_INPUT);
+				}
+			};
+
+			// Run some ticks to establish sync (use flush for initial setup)
+			for (let i = 0; i < 20; i++) {
+				hostSession.tick(NEUTRAL_INPUT);
+				p2Session.tick(NEUTRAL_INPUT);
+				p3Session.tick(NEUTRAL_INPUT);
+				flushAll(hostTransport, p2Transport, p3Transport);
+			}
+
+			// Verify initial sync
+			assert.strictEqual(hostGame.hash(), p2Game.hash(), "Initial sync check: host vs p2");
+			assert.strictEqual(hostGame.hash(), p3Game.hash(), "Initial sync check: host vs p3");
+
+			// Now switch to latency-based delivery and induce multiple desyncs
+			// This is the scenario that previously caused deadlock
+
+			// Induce desync #1
+			p2Game.induceDesync();
+			runTicksWithLatency(10); // ~160ms - not enough time for full sync with 100ms RTT
+
+			// Induce desync #2 before #1 fully recovers
+			p2Game.induceDesync();
+			runTicksWithLatency(10);
+
+			// Induce desync #3
+			p2Game.induceDesync();
+			runTicksWithLatency(10);
+
+			// Induce desync #4
+			p2Game.induceDesync();
+			runTicksWithLatency(10);
+
+			// Induce desync #5
+			p2Game.induceDesync();
+			runTicksWithLatency(10);
+
+			// At this point, the old code would have caused a deadlock
+			// with all players stuck at max speculation
+
+			// Run more ticks to allow recovery
+			// Use flush to ensure all messages are delivered
+			for (let i = 0; i < 60; i++) {
+				hostSession.tick(NEUTRAL_INPUT);
+				p2Session.tick(NEUTRAL_INPUT);
+				p3Session.tick(NEUTRAL_INPUT);
+				flushAll(hostTransport, p2Transport, p3Transport);
+			}
+
+			// Verify that sessions are NOT stuck at max speculation
+			// (the bug caused currentTick - confirmedTick >= maxSpeculationTicks)
+			const hostSpeculation = hostSession.currentTick - hostSession.confirmedTick;
+			const p2Speculation = p2Session.currentTick - p2Session.confirmedTick;
+			const p3Speculation = p3Session.currentTick - p3Session.confirmedTick;
+
+			assert.ok(
+				hostSpeculation < config.maxSpeculationTicks,
+				`Host should not be at max speculation (got ${hostSpeculation})`,
+			);
+			assert.ok(
+				p2Speculation < config.maxSpeculationTicks,
+				`P2 should not be at max speculation (got ${p2Speculation})`,
+			);
+			assert.ok(
+				p3Speculation < config.maxSpeculationTicks,
+				`P3 should not be at max speculation (got ${p3Speculation})`,
+			);
+
+			// Verify games are in sync after recovery
+			assert.strictEqual(
+				hostGame.hash(),
+				p2Game.hash(),
+				"After recovery: host and p2 should be in sync",
+			);
+			assert.strictEqual(
+				hostGame.hash(),
+				p3Game.hash(),
+				"After recovery: host and p3 should be in sync",
+			);
+
+			// Verify desyncs were detected
+			assert.ok(desyncCount > 0, `Should have detected desyncs (got ${desyncCount})`);
+
+			// Cleanup
+			hostSession.destroy();
+			p2Session.destroy();
+			p3Session.destroy();
+		});
+
+		it("should recover from multiple rapid desyncs with latency (Mesh + Host authority)", async () => {
+			const transports = createLocalTransportGroup(["host", "p2", "p3"], {
+				latency: 50,
+			});
+			const hostTransport = getTransport(transports, "host");
+			const p2Transport = getTransport(transports, "p2");
+			const p3Transport = getTransport(transports, "p3");
+
+			const hostGame = new TestGame();
+			const p2Game = new TestGame();
+			const p3Game = new TestGame();
+
+			const config = {
+				topology: Topology.Mesh,
+				desyncAuthority: DesyncAuthority.Host,
+				hashInterval: 5,
+				inputDelayTicks: 0,
+				maxSpeculationTicks: 60,
+			};
+
+			const hostSession = createSession({
+				game: hostGame,
+				transport: hostTransport,
+				config,
+			});
+			const p2Session = createSession({
+				game: p2Game,
+				transport: p2Transport,
+				config,
+			});
+			const p3Session = createSession({
+				game: p3Game,
+				transport: p3Transport,
+				config,
+			});
+
+			let hostDesyncCount = 0;
+			hostSession.on("desync", () => hostDesyncCount++);
+
+			// Set up session
+			await hostSession.createRoom();
+			await p2Session.joinRoom(hostSession.roomId!, "host");
+			flushAll(hostTransport, p2Transport, p3Transport);
+			await p3Session.joinRoom(hostSession.roomId!, "host");
+			flushAll(hostTransport, p2Transport, p3Transport);
+
+			// Establish peer-to-peer connections for Mesh
+			await p2Transport.connect("p3");
+			await p3Transport.connect("p2");
+			flushAll(hostTransport, p2Transport, p3Transport);
+
+			hostSession.start();
+			flushAll(hostTransport, p2Transport, p3Transport);
+
+			const TICK_MS = 16;
+
+			// Run initial sync ticks
+			for (let i = 0; i < 20; i++) {
+				hostSession.tick(NEUTRAL_INPUT);
+				p2Session.tick(NEUTRAL_INPUT);
+				p3Session.tick(NEUTRAL_INPUT);
+				flushAll(hostTransport, p2Transport, p3Transport);
+			}
+
+			// Verify initial sync
+			assert.strictEqual(hostGame.hash(), p2Game.hash(), "Initial sync: host vs p2");
+
+			// Induce multiple rapid desyncs with latency
+			for (let round = 0; round < 5; round++) {
+				p2Game.induceDesync();
+
+				// Run ticks with latency-based delivery
+				for (let i = 0; i < 10; i++) {
+					hostTransport.tick(TICK_MS);
+					p2Transport.tick(TICK_MS);
+					p3Transport.tick(TICK_MS);
+					hostSession.tick(NEUTRAL_INPUT);
+					p2Session.tick(NEUTRAL_INPUT);
+					p3Session.tick(NEUTRAL_INPUT);
+				}
+			}
+
+			// Run recovery ticks with flush to ensure delivery
+			for (let i = 0; i < 60; i++) {
+				hostSession.tick(NEUTRAL_INPUT);
+				p2Session.tick(NEUTRAL_INPUT);
+				p3Session.tick(NEUTRAL_INPUT);
+				flushAll(hostTransport, p2Transport, p3Transport);
+			}
+
+			// Verify not stuck at max speculation
+			const hostSpec = hostSession.currentTick - hostSession.confirmedTick;
+			const p2Spec = p2Session.currentTick - p2Session.confirmedTick;
+
+			assert.ok(
+				hostSpec < config.maxSpeculationTicks,
+				`Host should not be at max speculation (got ${hostSpec})`,
+			);
+			assert.ok(
+				p2Spec < config.maxSpeculationTicks,
+				`P2 should not be at max speculation (got ${p2Spec})`,
+			);
+
+			// Verify sync after recovery
+			assert.strictEqual(
+				hostGame.hash(),
+				p2Game.hash(),
+				"After recovery: host and p2 should be in sync",
+			);
+
+			// Host should have detected desyncs
+			assert.ok(hostDesyncCount > 0, `Host should have detected desyncs (got ${hostDesyncCount})`);
+
+			hostSession.destroy();
+			p2Session.destroy();
+			p3Session.destroy();
+		});
+	});
 });

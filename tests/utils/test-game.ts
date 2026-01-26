@@ -82,6 +82,16 @@ export class DesyncableTestGame extends TestGame {
 		this.nonDeterministic = false;
 		this.extraValue = 0;
 	}
+
+	/**
+	 * Directly modify state to induce a one-time desync.
+	 * Unlike enableDesync(), this doesn't affect future ticks.
+	 * This simulates the demo's "Desync" button behavior.
+	 */
+	induceDesync(offset = 50): void {
+		this.x += offset;
+		this.y += offset;
+	}
 }
 
 /**

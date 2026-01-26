@@ -562,6 +562,48 @@ export class RollbackEngine {
 	}
 
 	/**
+	 * Reset buffers and tick counters for sync without changing game state.
+	 *
+	 * Used by the host when broadcasting sync to all players. The host's game
+	 * state is already correct, but it needs to reset buffers and tick counters
+	 * to match the synced state being sent to clients.
+	 *
+	 * This is more efficient than setState() when the game state doesn't need
+	 * to be restored (avoids unnecessary serialize/deserialize round-trip).
+	 *
+	 * @param tick - The tick to reset to
+	 * @param playerTimeline - Timeline of player join/leave events
+	 */
+	resetForSync(tick: Tick, playerTimeline: PlayerTimeline): void {
+		// Clear buffers
+		this.snapshotBuffer.clear();
+		this.inputBuffer.clear();
+		this.localInputs.clear();
+
+		// Restore player timeline
+		for (const entry of playerTimeline) {
+			this.inputBuffer.addPlayer(entry.playerId, entry.joinTick);
+			if (entry.leaveTick !== null) {
+				this.inputBuffer.removePlayer(entry.playerId, entry.leaveTick);
+			}
+		}
+
+		// Set confirmed tick for all active players to tick-1
+		this.inputBuffer.setConfirmedTickForSync(tick);
+
+		// Save snapshot of current state at tick - 1
+		// (game state is already correct, just need to capture it)
+		const snapshotTick = asTick(tick - 1);
+		const state = this.gameSerialize(snapshotTick);
+		const hash = this.gameHash(snapshotTick);
+		this.snapshotBuffer.save(snapshotTick, state, hash);
+
+		// Set tick counters
+		this._currentTick = tick;
+		this._confirmedTick = asTick(tick - 1);
+	}
+
+	/**
 	 * Check if we have all inputs for a given tick.
 	 *
 	 * @param tick - The tick to check

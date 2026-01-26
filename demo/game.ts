@@ -3,6 +3,27 @@
  *
  * Each player controls a colored dot. The world state is a collection
  * of all player dots with their positions and colors.
+ *
+ * KEY IMPLEMENTATION NOTES:
+ *
+ * 1. GAME INTERFACE: Your game must implement the Game interface:
+ *    - serialize(): Convert state to bytes for network transmission
+ *    - deserialize(): Restore state from bytes (used during rollback)
+ *    - step(): Advance simulation by one tick given player inputs
+ *    - hash(): Return a number representing current state (for desync detection)
+ *
+ * 2. DETERMINISM: The step() function MUST be deterministic!
+ *    - Same inputs must always produce same outputs
+ *    - No Math.random(), Date.now(), or external state
+ *    - Use fixed-point math if floats cause issues
+ *
+ * 3. SERIALIZATION: Must capture ALL game state needed for rollback
+ *    - If you forget something, rollbacks will produce wrong results
+ *    - Include: positions, velocities, timers, any game variables
+ *
+ * 4. PLAYER MANAGEMENT: Handle dynamic join/leave in step()
+ *    - Players may join mid-game (state sync handles initial state)
+ *    - Auto-add unknown players if input arrives for them
  */
 
 import type { Game, PlayerId } from "../src/types.js";
@@ -160,10 +181,15 @@ export class DotGame implements Game {
   /**
    * Advance the simulation by one tick.
    * Processes each player's input to move their dot.
+   *
+   * IMPORTANT: This function must be DETERMINISTIC.
+   * Given the same inputs, it must always produce the same state changes.
    */
   step(inputs: Map<PlayerId, Uint8Array>): void {
     for (const [playerId, input] of inputs) {
-      // Auto-add player if not present (handles rollback resimulation case)
+      // IMPORTANT PATTERN: Auto-add player if not present.
+      // During rollback resimulation, players may not exist yet at earlier ticks.
+      // The library will provide their inputs, so we need to handle this gracefully.
       if (!this.players.has(playerId)) {
         this.addPlayer(playerId);
       }
@@ -186,10 +212,18 @@ export class DotGame implements Game {
 
   /**
    * Compute a hash of the current game state for desync detection.
+   *
+   * REQUIREMENTS:
+   * - Must be deterministic (same state = same hash)
+   * - Must include ALL state that affects gameplay
+   * - Iteration order must be consistent (use sorted keys or track order)
+   *
+   * TIP: Use playerOrder array for deterministic iteration over Map.
+   * Maps don't guarantee iteration order across different JS engines.
    */
   hash(): number {
     let h = 0;
-    // Use playerOrder for deterministic iteration
+    // Use playerOrder for deterministic iteration (Map order is not guaranteed)
     for (const id of this.playerOrder) {
       const state = this.players.get(id);
       if (!state) continue;

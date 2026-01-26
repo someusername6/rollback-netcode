@@ -918,4 +918,97 @@ describe("RollbackEngine", () => {
 			assert.strictEqual(p3Adds[0]?.tick, 4, "p3 should be added at tick 4");
 		});
 	});
+
+	describe("resetForSync", () => {
+		const remotePlayer = asPlayerId("remote");
+
+		beforeEach(() => {
+			engine.addPlayer(remotePlayer, asTick(0));
+		});
+
+		it("should reset tick counters without changing game state", () => {
+			// Advance the engine several ticks
+			for (let i = 0; i < 10; i++) {
+				engine.setLocalInput(asTick(i), new Uint8Array([138, 128])); // +10 x each tick
+				engine.receiveRemoteInput(remotePlayer, asTick(i), new Uint8Array([128, 128]));
+				engine.tick();
+			}
+
+			// Verify we've advanced
+			assert.strictEqual(engine.currentTick, 10);
+			assert.strictEqual(game.x, 100); // 10 ticks * +10 x
+
+			// Reset for sync at tick 5
+			const playerTimeline = [
+				{ playerId: localPlayer, joinTick: asTick(0), leaveTick: null },
+				{ playerId: remotePlayer, joinTick: asTick(0), leaveTick: null },
+			];
+			engine.resetForSync(asTick(5), playerTimeline);
+
+			// Tick counters should be reset
+			assert.strictEqual(engine.currentTick, 5);
+			assert.strictEqual(engine.confirmedTick, 4);
+
+			// But game state should NOT change (this is the key difference from setState)
+			assert.strictEqual(game.x, 100, "Game state should be preserved");
+		});
+
+		it("should clear input buffers", () => {
+			// Add some inputs
+			engine.setLocalInput(asTick(0), new Uint8Array([138, 128]));
+			engine.receiveRemoteInput(remotePlayer, asTick(0), new Uint8Array([128, 138]));
+			engine.tick();
+
+			engine.setLocalInput(asTick(1), new Uint8Array([138, 128]));
+			engine.receiveRemoteInput(remotePlayer, asTick(1), new Uint8Array([128, 138]));
+
+			// Reset for sync
+			const playerTimeline = [
+				{ playerId: localPlayer, joinTick: asTick(0), leaveTick: null },
+				{ playerId: remotePlayer, joinTick: asTick(0), leaveTick: null },
+			];
+			engine.resetForSync(asTick(5), playerTimeline);
+
+			// Local inputs should be cleared
+			assert.strictEqual(engine.getLocalInput(asTick(0)), undefined);
+			assert.strictEqual(engine.getLocalInput(asTick(1)), undefined);
+		});
+
+		it("should restore player timeline", () => {
+			const p2 = asPlayerId("p2");
+
+			// Reset with a new player in the timeline
+			const playerTimeline = [
+				{ playerId: localPlayer, joinTick: asTick(0), leaveTick: null },
+				{ playerId: remotePlayer, joinTick: asTick(0), leaveTick: asTick(3) }, // Left at tick 3
+				{ playerId: p2, joinTick: asTick(2), leaveTick: null }, // New player joined at tick 2
+			];
+			engine.resetForSync(asTick(5), playerTimeline);
+
+			// Check active players at different ticks
+			const activeAtTick1 = engine.getActivePlayers();
+			// At tick 5: local is active, remote left at 3, p2 joined at 2
+			// So active should be: local, p2
+			assert.ok(activeAtTick1.includes(localPlayer));
+			assert.ok(activeAtTick1.includes(p2));
+			assert.ok(!activeAtTick1.includes(remotePlayer)); // Left at tick 3
+		});
+
+		it("should save a snapshot at tick-1", () => {
+			// Advance and modify game state
+			engine.setLocalInput(asTick(0), new Uint8Array([138, 128]));
+			engine.receiveRemoteInput(remotePlayer, asTick(0), new Uint8Array([128, 128]));
+			engine.tick();
+
+			const playerTimeline = [
+				{ playerId: localPlayer, joinTick: asTick(0), leaveTick: null },
+				{ playerId: remotePlayer, joinTick: asTick(0), leaveTick: null },
+			];
+			engine.resetForSync(asTick(5), playerTimeline);
+
+			// Should have a snapshot at tick 4 (sync tick - 1)
+			const hash = engine.getHash(asTick(4));
+			assert.ok(hash !== undefined, "Should have snapshot at tick-1");
+		});
+	});
 });

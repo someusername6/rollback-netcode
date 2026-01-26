@@ -1664,8 +1664,12 @@ var SnapshotBuffer = class {
   /**
    * Save a snapshot at a specific tick.
    *
+   * If the tick already exists, updates in-place to maintain sort order.
    * If the buffer is full, the oldest snapshot is evicted.
    * The state is copied to prevent external mutation.
+   *
+   * PRECONDITION: New ticks (not already in buffer) must be >= all existing ticks.
+   * Saving an out-of-order new tick corrupts sort order. See class invariant.
    *
    * @param tick - The tick this snapshot was taken at
    * @param state - The serialized game state
@@ -1679,6 +1683,16 @@ var SnapshotBuffer = class {
       state: stateCopy,
       hash
     };
+    const existingIdx = this.tickToIndex.get(tick);
+    if (existingIdx !== void 0) {
+      this.buffer[existingIdx] = snapshot;
+      return;
+    }
+    if (this._newestTick !== void 0 && tick < this._newestTick) {
+      console.error(
+        `SnapshotBuffer: tick ${tick} is out of order (newest: ${this._newestTick}). This will corrupt binary search in getAtOrBefore().`
+      );
+    }
     if (this.count === this.capacity) {
       const oldSnapshot = this.buffer[this.head];
       if (oldSnapshot) {
@@ -1752,6 +1766,8 @@ var SnapshotBuffer = class {
    * Get the snapshot at or before a given tick.
    * Useful for finding the closest snapshot for rollback.
    *
+   * O(log n) binary search. Snapshots are stored in ascending tick order.
+   *
    * @param tick - The target tick
    * @returns The snapshot at or before that tick, or undefined if none exists
    */
@@ -1759,17 +1775,21 @@ var SnapshotBuffer = class {
     if (this.count === 0) {
       return void 0;
     }
-    let best;
-    for (let i = 0; i < this.count; i++) {
-      const idx = (this.head + i) % this.capacity;
+    let lo = 0;
+    let hi = this.count - 1;
+    let result;
+    while (lo <= hi) {
+      const mid = lo + hi >>> 1;
+      const idx = (this.head + mid) % this.capacity;
       const snapshot = this.buffer[idx];
       if (snapshot && snapshot.tick <= tick) {
-        if (!best || snapshot.tick > best.tick) {
-          best = snapshot;
-        }
+        result = snapshot;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
       }
     }
-    return best;
+    return result;
   }
   /**
    * Remove all snapshots before a given tick.
@@ -1824,7 +1844,6 @@ var SnapshotBuffer = class {
 };
 
 // src/rollback/engine.ts
-var PRUNE_BUFFER_TICKS = 10;
 var RollbackEngine = class {
   game;
   localPlayerId;
@@ -1832,6 +1851,7 @@ var RollbackEngine = class {
   inputBuffer;
   inputPredictor;
   maxSpeculationTicks;
+  pruneBufferTicks;
   onPlayerAddDuringResimulation;
   onPlayerRemoveDuringResimulation;
   onRollback;
@@ -1845,6 +1865,7 @@ var RollbackEngine = class {
     this.game = config.game;
     this.localPlayerId = config.localPlayerId;
     this.maxSpeculationTicks = config.maxSpeculationTicks ?? 60;
+    this.pruneBufferTicks = config.pruneBufferTicks ?? 10;
     this.inputPredictor = config.inputPredictor ?? DEFAULT_INPUT_PREDICTOR;
     this.onPlayerAddDuringResimulation = config.onPlayerAddDuringResimulation;
     this.onPlayerRemoveDuringResimulation = config.onPlayerRemoveDuringResimulation;
@@ -2099,8 +2120,8 @@ var RollbackEngine = class {
     );
     if (minConfirmed !== void 0 && minConfirmed > this._confirmedTick) {
       this._confirmedTick = minConfirmed;
-      if (this._confirmedTick > PRUNE_BUFFER_TICKS) {
-        const pruneBelow = asTick(this._confirmedTick - PRUNE_BUFFER_TICKS);
+      if (this._confirmedTick > this.pruneBufferTicks) {
+        const pruneBelow = asTick(this._confirmedTick - this.pruneBufferTicks);
         this.inputBuffer.pruneBeforeTick(pruneBelow);
         this.snapshotBuffer.pruneBeforeTick(pruneBelow);
         for (const tick of this.localInputs.keys()) {
@@ -2170,6 +2191,37 @@ var RollbackEngine = class {
     }
     this.inputBuffer.setConfirmedTickForSync(tick);
     const snapshotTick = asTick(tick - 1);
+    const hash = this.gameHash(snapshotTick);
+    this.snapshotBuffer.save(snapshotTick, state, hash);
+    this._currentTick = tick;
+    this._confirmedTick = asTick(tick - 1);
+  }
+  /**
+   * Reset buffers and tick counters for sync without changing game state.
+   *
+   * Used by the host when broadcasting sync to all players. The host's game
+   * state is already correct, but it needs to reset buffers and tick counters
+   * to match the synced state being sent to clients.
+   *
+   * This is more efficient than setState() when the game state doesn't need
+   * to be restored (avoids unnecessary serialize/deserialize round-trip).
+   *
+   * @param tick - The tick to reset to
+   * @param playerTimeline - Timeline of player join/leave events
+   */
+  resetForSync(tick, playerTimeline) {
+    this.snapshotBuffer.clear();
+    this.inputBuffer.clear();
+    this.localInputs.clear();
+    for (const entry of playerTimeline) {
+      this.inputBuffer.addPlayer(entry.playerId, entry.joinTick);
+      if (entry.leaveTick !== null) {
+        this.inputBuffer.removePlayer(entry.playerId, entry.leaveTick);
+      }
+    }
+    this.inputBuffer.setConfirmedTickForSync(tick);
+    const snapshotTick = asTick(tick - 1);
+    const state = this.gameSerialize(snapshotTick);
     const hash = this.gameHash(snapshotTick);
     this.snapshotBuffer.save(snapshotTick, state, hash);
     this._currentTick = tick;
@@ -3033,6 +3085,11 @@ var Session = class _Session {
     validatePlayerId(this._localPlayerId);
     this.topologyStrategy = createTopologyStrategy(this.config.topology);
     this.debug = createDebugLogger(this.config.debug);
+    if (this.config.topology === 0 /* Mesh */ && this.config.maxPlayers > 4) {
+      console.warn(
+        "[rollback-netcode] Mesh topology with >4 players is not recommended. Mesh requires N\xD7(N-1)/2 connections which scales poorly. Consider using Star topology for better performance."
+      );
+    }
     this.playerManager = new PlayerManager();
     this.desyncManager = new DesyncManager({
       topology: this.config.topology,
@@ -3424,6 +3481,23 @@ var Session = class _Session {
       this.broadcastInput(currentTick, localInput);
     }
     const result = this.engine.tick();
+    if (result.error) {
+      this.debug.warn("Rollback error", {
+        tick: result.tick,
+        error: result.error.message
+      });
+      this.emitError(result.error, {
+        source: 0 /* Engine */,
+        recoverable: true,
+        details: {
+          tick: result.tick,
+          rollbackTarget: result.error.tick
+        }
+      });
+      if (!this._isHost) {
+        this.requestSync();
+      }
+    }
     if (result.rolledBack && result.rollbackTicks !== void 0) {
       this.debug.log("Rollback triggered", {
         tick: result.tick,
@@ -3554,16 +3628,16 @@ var Session = class _Session {
   /**
    * Update session state and emit event.
    * Validates that the transition is allowed by the state machine.
+   * @throws Error if the transition is not valid
    */
   setState(newState) {
     const oldState = this._state;
     if (oldState === newState) return;
     const validNextStates = _Session.VALID_TRANSITIONS.get(oldState);
     if (!validNextStates?.has(newState)) {
-      this.debug.warn("Invalid state transition attempted", {
-        from: SessionState[oldState],
-        to: SessionState[newState]
-      });
+      throw new Error(
+        `Invalid state transition: ${SessionState[oldState]} \u2192 ${SessionState[newState]}`
+      );
     }
     this._state = newState;
     this.emit("stateChange", newState, oldState);
@@ -3815,6 +3889,22 @@ var Session = class _Session {
   }
   /**
    * Handle sync request (host only).
+   *
+   * IMPORTANT: When a sync is requested, we broadcast the authoritative state
+   * to ALL players, not just the requester. This ensures all players are
+   * synchronized to the same tick, preventing tick divergence issues that
+   * can occur with latency:
+   *
+   * Without broadcast-to-all:
+   * 1. Player-2 desyncs, requests sync from host at tick X
+   * 2. With latency, host responds with state at tick X+3
+   * 3. Player-2 resets to tick X+3, but player-1/3 are at tick X+6
+   * 4. Player-1/3's input redundancy doesn't cover tick X+3
+   * 5. Player-2 can't advance confirmedTick -> max speculation -> deadlock
+   *
+   * With broadcast-to-all:
+   * - All players reset to the same tick simultaneously
+   * - No tick divergence, no deadlock
    */
   handleSyncRequest(message) {
     if (!this._isHost) return;
@@ -3825,7 +3915,9 @@ var Session = class _Session {
       this.engine.getCurrentHash(),
       state.playerTimeline
     );
-    this.sendToPeer(message.playerId, syncMsg, true);
+    this.broadcast(syncMsg, true);
+    this.engine.resetForSync(state.tick, state.playerTimeline);
+    this.pendingHashMessages = [];
   }
   /**
    * Handle join request (host only).
@@ -3953,6 +4045,12 @@ var Session = class _Session {
       this.engine.removePlayer(message.playerId, message.leaveTick);
       this.emittedJoinEvents.delete(message.playerId);
       this.emit("playerLeft", player);
+      if (this._isHost && this.config.topology === 1 /* Star */) {
+        this.broadcast(
+          createPlayerLeft(message.playerId, message.leaveTick),
+          true
+        );
+      }
     }
   }
   /**
@@ -4058,25 +4156,26 @@ var Session = class _Session {
       return;
     }
     const desyncs = this.desyncManager.checkDesyncs(tick, this.localPlayerId);
-    for (const desync of desyncs) {
-      this.debug.warn("Desync detected by host", {
-        tick: desync.tick,
-        playerId: desync.desyncedPlayerId,
-        hostHash: desync.referenceHash,
-        playerHash: desync.playerHash
-      });
-      this.emit("desync", desync.tick, desync.referenceHash, desync.playerHash);
+    if (desyncs.length > 0) {
+      for (const desync of desyncs) {
+        this.debug.warn("Desync detected by host", {
+          tick: desync.tick,
+          playerId: desync.desyncedPlayerId,
+          hostHash: desync.referenceHash,
+          playerHash: desync.playerHash
+        });
+        this.emit("desync", desync.tick, desync.referenceHash, desync.playerHash);
+      }
       const state = this.engine.getState();
-      this.sendToPeer(
-        desync.desyncedPlayerId,
-        createSync(
-          state.tick,
-          state.state,
-          this.engine.getCurrentHash(),
-          state.playerTimeline
-        ),
-        true
+      const syncMsg = createSync(
+        state.tick,
+        state.state,
+        this.engine.getCurrentHash(),
+        state.playerTimeline
       );
+      this.broadcast(syncMsg, true);
+      this.engine.resetForSync(state.tick, state.playerTimeline);
+      this.pendingHashMessages = [];
     }
     this.desyncManager.pruneOldHashes(tick);
   }
@@ -4398,10 +4497,12 @@ var LocalTransport = class {
   }
   /**
    * Deliver a single message to its target peer.
+   * Messages are delivered regardless of current connection state, simulating
+   * real networks where messages in flight can arrive after disconnect.
    */
   deliverMessage(pending) {
     const peer = this.linkedTransports.get(pending.targetPeerId);
-    if (peer?._connectedPeers.has(this.localPeerId)) {
+    if (peer) {
       peer.onMessage?.(this.localPeerId, pending.message);
     }
   }
@@ -8729,6 +8830,9 @@ var DotGame = class {
   /**
    * Advance the simulation by one tick.
    * Processes each player's input to move their dot.
+   *
+   * IMPORTANT: This function must be DETERMINISTIC.
+   * Given the same inputs, it must always produce the same state changes.
    */
   step(inputs) {
     for (const [playerId, input] of inputs) {
@@ -8748,6 +8852,14 @@ var DotGame = class {
   }
   /**
    * Compute a hash of the current game state for desync detection.
+   *
+   * REQUIREMENTS:
+   * - Must be deterministic (same state = same hash)
+   * - Must include ALL state that affects gameplay
+   * - Iteration order must be consistent (use sorted keys or track order)
+   *
+   * TIP: Use playerOrder array for deterministic iteration over Map.
+   * Maps don't guarantee iteration order across different JS engines.
    */
   hash() {
     let h = 0;
@@ -8801,6 +8913,37 @@ var DotGame = class {
 // demo/demo.ts
 var TICK_RATE = 60;
 var TICK_MS = 1e3 / TICK_RATE;
+var HASH_INTERVAL = 30;
+var FLUSH_ITERATIONS = 5;
+var JITTER_RATIO = 0.2;
+var SPAWN_POSITIONS = [
+  { x: 0.25, y: 0.25 },
+  // top-left quadrant
+  { x: 0.75, y: 0.75 },
+  // bottom-right quadrant (diagonal from first)
+  { x: 0.75, y: 0.25 },
+  // top-right quadrant
+  { x: 0.25, y: 0.75 },
+  // bottom-left quadrant
+  { x: 0.5, y: 0.15 },
+  // top center
+  { x: 0.5, y: 0.85 },
+  // bottom center
+  { x: 0.12, y: 0.5 },
+  // left center
+  { x: 0.88, y: 0.5 },
+  // right center
+  { x: 0.15, y: 0.15 },
+  // corner positions for 9-12
+  { x: 0.85, y: 0.85 },
+  { x: 0.85, y: 0.15 },
+  { x: 0.15, y: 0.85 },
+  { x: 0.4, y: 0.35 },
+  // inner positions for 13-16
+  { x: 0.6, y: 0.65 },
+  { x: 0.6, y: 0.35 },
+  { x: 0.4, y: 0.65 }
+];
 var MAX_PLAYERS = 16;
 var DemoManager = class {
   players = /* @__PURE__ */ new Map();
@@ -8890,17 +9033,28 @@ var DemoManager = class {
   }
   /**
    * Add a new player to the demo.
+   *
+   * This demonstrates the typical flow for adding a player:
+   * 1. Create a transport (LocalTransport for testing, WebRTCTransport for production)
+   * 2. Link transports based on topology
+   * 3. Create game instance
+   * 4. Create session with game + transport
+   * 5. Register event handlers
+   * 6. Host creates room, others join
    */
   addPlayer() {
-    const playerId = `player-${++this.playerCounter}`;
+    const playerId = asPlayerId(`player-${++this.playerCounter}`);
     const isHost = this.players.size === 0;
     const transport = new LocalTransport(playerId, {
       latency: this.simulatedLatency,
-      jitter: Math.floor(this.simulatedLatency * 0.2)
-      // 20% jitter
+      jitter: Math.floor(this.simulatedLatency * JITTER_RATIO)
     });
     if (!isHost) {
-      const hostEntry = this.players.values().next().value;
+      const hostEntry = this.getHostEntry();
+      if (!hostEntry) {
+        this.showError("Cannot add player: no host found");
+        return;
+      }
       LocalTransport.link(transport, hostEntry.transport);
       if (this.topology === 0 /* Mesh */) {
         for (const [id, entry2] of this.players) {
@@ -8919,12 +9073,15 @@ var DemoManager = class {
         topology: this.topology,
         desyncAuthority: this.desyncAuthority,
         tickRate: TICK_RATE,
-        hashInterval: 30,
+        // hashInterval: How often to send state hashes for desync detection
+        // Lower = faster detection, higher = less bandwidth
+        hashInterval: HASH_INTERVAL,
         maxPlayers: MAX_PLAYERS
       }
     });
     session.on("playerJoined", (info) => {
-      game.addPlayer(info.id);
+      const spawn = this.getSpawnPosition(info.id);
+      game.addPlayer(info.id, spawn.x, spawn.y);
     });
     session.on("playerLeft", (info) => {
       game.removePlayer(info.id);
@@ -8932,7 +9089,7 @@ var DemoManager = class {
     session.on("desync", (tick, localHash, remoteHash) => {
       this.showDesyncFeedback(playerId, tick, localHash, remoteHash);
     });
-    const { panel, canvas, ctx } = this.createPlayerPanel(playerId, isHost);
+    const { panel, canvas, ctx, statsEl } = this.createPlayerPanel(playerId, isHost);
     const entry = {
       id: playerId,
       session,
@@ -8940,38 +9097,80 @@ var DemoManager = class {
       transport,
       canvas,
       ctx,
-      panel
+      panel,
+      statsEl,
+      rollbackCount: 0
     };
     this.players.set(playerId, entry);
     this.updateAddPlayerButton();
     if (isHost) {
       session.createRoom().then(() => {
-        game.addPlayer(playerId);
+        const spawn = this.getSpawnPosition(playerId);
+        game.addPlayer(playerId, spawn.x, spawn.y);
         session.start();
         this.startGameLoop();
+      }).catch((error) => {
+        this.showError(`Failed to create room: ${error.message}`);
+        this.removePlayer(playerId);
       });
     } else {
-      const hostEntry = this.players.values().next().value;
+      const hostEntry = this.getHostEntry();
+      if (!hostEntry) {
+        this.showError("Cannot join: no host found");
+        this.removePlayer(playerId);
+        return;
+      }
       const hostRoomId = hostEntry.session.roomId;
       if (!hostRoomId) {
-        console.error("Host room ID not available");
+        this.showError("Host room ID not available yet");
+        this.removePlayer(playerId);
         return;
       }
       session.joinRoom(hostRoomId, hostEntry.id).then(async () => {
         if (this.topology === 0 /* Mesh */) {
-          for (const [id, entry2] of this.players) {
+          for (const [id, otherEntry] of this.players) {
             if (id !== hostEntry.id && id !== playerId) {
               await transport.connect(id);
-              await entry2.transport.connect(playerId);
+              await otherEntry.transport.connect(playerId);
             }
           }
         }
         this.flushAllTransports();
+      }).catch((error) => {
+        this.showError(`Failed to join room: ${error.message}`);
+        this.removePlayer(playerId);
       });
     }
     if (isHost) {
       this.setActivePlayer(playerId);
     }
+  }
+  /**
+   * Get the host player entry (first player added).
+   */
+  getHostEntry() {
+    return this.players.values().next().value;
+  }
+  /**
+   * Get spawn position for a player based on their ID.
+   * Player IDs are "player-N" where N is 1-indexed.
+   */
+  getSpawnPosition(playerId) {
+    const match = playerId.match(/player-(\d+)/);
+    const playerNum = match ? parseInt(match[1], 10) : 1;
+    const index = (playerNum - 1) % SPAWN_POSITIONS.length;
+    const pos = SPAWN_POSITIONS[index];
+    return {
+      x: pos.x * CANVAS_WIDTH,
+      y: pos.y * CANVAS_HEIGHT
+    };
+  }
+  /**
+   * Show an error message to the user.
+   */
+  showError(message) {
+    console.error(message);
+    alert(message);
   }
   /**
    * Remove a player from the demo.
@@ -9012,12 +9211,16 @@ var DemoManager = class {
     const header = document.createElement("div");
     header.className = "player-header";
     header.innerHTML = `
-      <span class="player-name">${playerId}${isHost ? " (host)" : ""}</span>
+      <div class="player-info">
+        <span class="player-name">${playerId}${isHost ? " (host)" : ""}</span>
+        <span class="player-stats"></span>
+      </div>
       <div class="player-buttons">
-        <button class="btn-desync">Induce Desync</button>
+        <button class="btn-desync">Desync</button>
         <button class="btn-disconnect">Disconnect</button>
       </div>
     `;
+    const statsEl = header.querySelector(".player-stats");
     const canvas = document.createElement("canvas");
     canvas.width = CANVAS_WIDTH;
     canvas.height = CANVAS_HEIGHT;
@@ -9037,7 +9240,7 @@ var DemoManager = class {
     panel.appendChild(canvas);
     container.appendChild(panel);
     const ctx = canvas.getContext("2d");
-    return { panel, canvas, ctx };
+    return { panel, canvas, ctx, statsEl };
   }
   /**
    * Set the active player (receives keyboard input).
@@ -9077,9 +9280,13 @@ var DemoManager = class {
   }
   /**
    * Flush all transports to deliver pending messages.
+   *
+   * Multiple iterations are needed because in Star topology, a message
+   * from player A to player B goes: A → Host → B (2 hops).
+   * Each flush() only delivers messages queued at that moment.
    */
   flushAllTransports() {
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < FLUSH_ITERATIONS; i++) {
       for (const entry of this.players.values()) {
         entry.transport.flush();
       }
@@ -9120,23 +9327,33 @@ var DemoManager = class {
    * time-based delivery to simulate realistic network conditions.
    */
   tick() {
+    const input = this.getInput();
+    const now = performance.now();
     if (this.simulatedLatency === 0) {
       this.flushAllTransportsOnce();
-      const input = this.getInput();
       for (const entry of this.players.values()) {
         const playerInput = entry.id === this.activePlayerId ? input : new Uint8Array([0]);
-        entry.session.tick(playerInput);
+        const result = entry.session.tick(playerInput);
+        this.trackRollback(entry, result, now);
         this.flushAllTransportsOnce();
       }
     } else {
       for (const entry of this.players.values()) {
         entry.transport.tick(TICK_MS);
       }
-      const input = this.getInput();
       for (const entry of this.players.values()) {
         const playerInput = entry.id === this.activePlayerId ? input : new Uint8Array([0]);
-        entry.session.tick(playerInput);
+        const result = entry.session.tick(playerInput);
+        this.trackRollback(entry, result, now);
       }
+    }
+  }
+  /**
+   * Track rollback events and update stats.
+   */
+  trackRollback(entry, result, _now) {
+    if (result.rolledBack) {
+      entry.rollbackCount++;
     }
   }
   /**
@@ -9148,12 +9365,28 @@ var DemoManager = class {
     }
   }
   /**
-   * Render all game views.
+   * Render all game views and update stats.
    */
   render() {
     for (const entry of this.players.values()) {
       entry.game.draw(entry.ctx, entry.id);
+      this.updateStats(entry);
     }
+  }
+  /**
+   * Update the stats display for a player.
+   * Shows rollback count and simulated latency (RTT).
+   */
+  updateStats(entry) {
+    const parts = [];
+    if (entry.rollbackCount > 0) {
+      parts.push(`Rollbacks: ${entry.rollbackCount}`);
+    }
+    if (this.simulatedLatency > 0) {
+      const rtt = this.simulatedLatency * 2;
+      parts.push(`RTT: ~${rtt}ms`);
+    }
+    entry.statsEl.textContent = parts.length > 0 ? parts.join(" | ") : "";
   }
 };
 document.addEventListener("DOMContentLoaded", () => {

@@ -130,6 +130,8 @@ header a:hover {
   border-radius: 8px;
   overflow: hidden;
   transition: border-color 0.2s, box-shadow 0.2s;
+  width: 300px; /* Fixed width matching canvas */
+  flex-shrink: 0; /* Prevent flex from shrinking panels */
 }
 
 .player-panel.active {
@@ -159,11 +161,24 @@ header a:hover {
   padding: 10px 12px;
   background: #252540;
   border-bottom: 1px solid #333;
+  min-height: 52px; /* Fixed height to prevent layout jumps */
+}
+
+.player-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .player-name {
   font-weight: 600;
   font-size: 0.9rem;
+}
+
+.player-stats {
+  font-size: 0.75rem;
+  color: #888;
+  min-height: 1em; /* Reserve space even when empty */
 }
 
 .player-buttons {

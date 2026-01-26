@@ -1238,6 +1238,22 @@ export class Session {
 
 	/**
 	 * Handle sync request (host only).
+	 *
+	 * IMPORTANT: When a sync is requested, we broadcast the authoritative state
+	 * to ALL players, not just the requester. This ensures all players are
+	 * synchronized to the same tick, preventing tick divergence issues that
+	 * can occur with latency:
+	 *
+	 * Without broadcast-to-all:
+	 * 1. Player-2 desyncs, requests sync from host at tick X
+	 * 2. With latency, host responds with state at tick X+3
+	 * 3. Player-2 resets to tick X+3, but player-1/3 are at tick X+6
+	 * 4. Player-1/3's input redundancy doesn't cover tick X+3
+	 * 5. Player-2 can't advance confirmedTick -> max speculation -> deadlock
+	 *
+	 * With broadcast-to-all:
+	 * - All players reset to the same tick simultaneously
+	 * - No tick divergence, no deadlock
 	 */
 	private handleSyncRequest(
 		message: Message & { type: MessageType.SyncRequest },
@@ -1252,8 +1268,16 @@ export class Session {
 			state.playerTimeline,
 		);
 
-		// Send to the requesting player
-		this.sendToPeer(message.playerId, syncMsg, true);
+		// Broadcast sync to ALL players to prevent tick divergence
+		// The requesting player needs the state, but other players also need
+		// to synchronize to avoid getting stuck at max speculation
+		this.broadcast(syncMsg, true);
+
+		// Reset host's buffers and tick counters to match the synced state
+		// (game state is already correct, so use resetForSync instead of setState
+		// to avoid unnecessary serialize/deserialize round-trip)
+		this.engine.resetForSync(state.tick, state.playerTimeline);
+		this.pendingHashMessages = [];
 	}
 
 	/**
@@ -1598,27 +1622,33 @@ export class Session {
 
 		// Check for desyncs
 		const desyncs = this.desyncManager.checkDesyncs(tick, this.localPlayerId);
-		for (const desync of desyncs) {
-			this.debug.warn("Desync detected by host", {
-				tick: desync.tick,
-				playerId: desync.desyncedPlayerId,
-				hostHash: desync.referenceHash,
-				playerHash: desync.playerHash,
-			});
-			this.emit("desync", desync.tick, desync.referenceHash, desync.playerHash);
+		if (desyncs.length > 0) {
+			// Log all detected desyncs
+			for (const desync of desyncs) {
+				this.debug.warn("Desync detected by host", {
+					tick: desync.tick,
+					playerId: desync.desyncedPlayerId,
+					hostHash: desync.referenceHash,
+					playerHash: desync.playerHash,
+				});
+				this.emit("desync", desync.tick, desync.referenceHash, desync.playerHash);
+			}
 
-			// Send authoritative state to desynced player
+			// Broadcast authoritative state to ALL players to prevent tick divergence
+			// (see handleSyncRequest for detailed explanation of why this is necessary)
 			const state = this.engine.getState();
-			this.sendToPeer(
-				desync.desyncedPlayerId,
-				createSync(
-					state.tick,
-					state.state,
-					this.engine.getCurrentHash(),
-					state.playerTimeline,
-				),
-				true,
+			const syncMsg = createSync(
+				state.tick,
+				state.state,
+				this.engine.getCurrentHash(),
+				state.playerTimeline,
 			);
+			this.broadcast(syncMsg, true);
+
+			// Reset host's buffers and tick counters to match the synced state
+			// (use resetForSync instead of setState to avoid unnecessary deserialize)
+			this.engine.resetForSync(state.tick, state.playerTimeline);
+			this.pendingHashMessages = [];
 		}
 
 		// Cleanup old tick entries

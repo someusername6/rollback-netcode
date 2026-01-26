@@ -3,24 +3,92 @@
  *
  * Simulates multiple players locally to demonstrate the library's features
  * without requiring real network connections.
+ *
+ * KEY CONCEPTS DEMONSTRATED:
+ *
+ * 1. TOPOLOGY (Star vs Mesh):
+ *    - Star: All clients connect to host only. Host relays messages.
+ *      Simpler, lower bandwidth, but host is single point of failure.
+ *    - Mesh: All clients connect to each other directly.
+ *      More bandwidth, but more resilient.
+ *
+ * 2. DESYNC AUTHORITY (Host vs Peer):
+ *    - Host: Only the host checks for desyncs by comparing hashes.
+ *      Clients trust the host's state as authoritative.
+ *    - Peer: All peers check for desyncs independently.
+ *      More robust detection but more network traffic.
+ *
+ * 3. ROLLBACK:
+ *    When a player's input arrives late, the library:
+ *    a) Restores game state from a snapshot (before the late input)
+ *    b) Re-simulates forward with the correct inputs
+ *    c) This happens automatically - you just see the corrected state
+ *
+ * 4. HASH INTERVAL:
+ *    How often (in ticks) to send state hashes for desync detection.
+ *    Lower = faster detection but more bandwidth. 30 = every 0.5s at 60Hz.
+ *
+ * 5. TRANSPORT FLUSHING:
+ *    LocalTransport queues messages. flush() delivers them.
+ *    Multiple flushes handle multi-hop delivery (A→Host→B in Star topology).
  */
 
-import { createSession, LocalTransport, Topology, DesyncAuthority } from "../src/index.js";
-import type { Session } from "../src/session/session.js";
+import {
+  createSession,
+  LocalTransport,
+  Topology,
+  DesyncAuthority,
+  asPlayerId,
+} from "../src/index.js";
+import type { Session, PlayerId } from "../src/index.js";
 import { DotGame, Input, CANVAS_WIDTH, CANVAS_HEIGHT } from "./game.js";
 
-/** Tick rate in Hz */
+/** Tick rate in Hz - how many simulation steps per second */
 const TICK_RATE = 60;
+/** Milliseconds per tick */
 const TICK_MS = 1000 / TICK_RATE;
+/** How often to send state hashes for desync detection (every N ticks) */
+const HASH_INTERVAL = 30; // = 0.5 seconds at 60Hz
+/** Number of transport flush iterations for multi-hop message delivery */
+const FLUSH_ITERATIONS = 5;
+/** Jitter as percentage of latency (20% is realistic for internet) */
+const JITTER_RATIO = 0.2;
+
+/**
+ * Predefined spawn positions as fractions of canvas size.
+ * Ordered so that 2 players are diagonal, 4 players are in corners, etc.
+ */
+const SPAWN_POSITIONS = [
+  { x: 0.25, y: 0.25 }, // top-left quadrant
+  { x: 0.75, y: 0.75 }, // bottom-right quadrant (diagonal from first)
+  { x: 0.75, y: 0.25 }, // top-right quadrant
+  { x: 0.25, y: 0.75 }, // bottom-left quadrant
+  { x: 0.5, y: 0.15 },  // top center
+  { x: 0.5, y: 0.85 },  // bottom center
+  { x: 0.12, y: 0.5 },  // left center
+  { x: 0.88, y: 0.5 },  // right center
+  { x: 0.15, y: 0.15 }, // corner positions for 9-12
+  { x: 0.85, y: 0.85 },
+  { x: 0.85, y: 0.15 },
+  { x: 0.15, y: 0.85 },
+  { x: 0.4, y: 0.35 },  // inner positions for 13-16
+  { x: 0.6, y: 0.65 },
+  { x: 0.6, y: 0.35 },
+  { x: 0.4, y: 0.65 },
+];
 
 interface PlayerEntry {
-  id: string;
+  id: PlayerId;
   session: Session;
   game: DotGame;
   transport: LocalTransport;
   canvas: HTMLCanvasElement;
   ctx: CanvasRenderingContext2D;
   panel: HTMLElement;
+  /** DOM element displaying stats (rollbacks, latency) */
+  statsEl: HTMLElement;
+  /** Total rollback count for this session */
+  rollbackCount: number;
 }
 
 /**
@@ -30,8 +98,8 @@ interface PlayerEntry {
 const MAX_PLAYERS = 16;
 
 class DemoManager {
-  players: Map<string, PlayerEntry> = new Map();
-  activePlayerId: string | null = null;
+  players: Map<PlayerId, PlayerEntry> = new Map();
+  activePlayerId: PlayerId | null = null;
   private pressedKeys: Set<string> = new Set();
   private playerCounter = 0;
   private lastTickTime = 0;
@@ -133,20 +201,35 @@ class DemoManager {
 
   /**
    * Add a new player to the demo.
+   *
+   * This demonstrates the typical flow for adding a player:
+   * 1. Create a transport (LocalTransport for testing, WebRTCTransport for production)
+   * 2. Link transports based on topology
+   * 3. Create game instance
+   * 4. Create session with game + transport
+   * 5. Register event handlers
+   * 6. Host creates room, others join
    */
   addPlayer(): void {
-    const playerId = `player-${++this.playerCounter}`;
+    const playerId = asPlayerId(`player-${++this.playerCounter}`);
     const isHost = this.players.size === 0;
 
     // Create transport with simulated latency
+    // In production, you'd use WebRTCTransport instead of LocalTransport
     const transport = new LocalTransport(playerId, {
       latency: this.simulatedLatency,
-      jitter: Math.floor(this.simulatedLatency * 0.2), // 20% jitter
+      jitter: Math.floor(this.simulatedLatency * JITTER_RATIO),
     });
 
     // Link transport based on topology
+    // Star: only connect to host (host relays messages)
+    // Mesh: connect to all peers (direct P2P)
     if (!isHost) {
-      const hostEntry = this.players.values().next().value as PlayerEntry;
+      const hostEntry = this.getHostEntry();
+      if (!hostEntry) {
+        this.showError("Cannot add player: no host found");
+        return;
+      }
       LocalTransport.link(transport, hostEntry.transport);
 
       if (this.topology === Topology.Mesh) {
@@ -159,26 +242,31 @@ class DemoManager {
       }
     }
 
-    // Create game instance
+    // Create game instance - each player has their own local copy
+    // The rollback library keeps them in sync
     const game = new DotGame();
 
-    // Create session
+    // Create session - this is the main interface to the rollback library
     const session = createSession({
       game,
       transport,
-      localPlayerId: playerId as any,
+      localPlayerId: playerId,
       config: {
         topology: this.topology,
         desyncAuthority: this.desyncAuthority,
         tickRate: TICK_RATE,
-        hashInterval: 30,
+        // hashInterval: How often to send state hashes for desync detection
+        // Lower = faster detection, higher = less bandwidth
+        hashInterval: HASH_INTERVAL,
         maxPlayers: MAX_PLAYERS,
       },
     });
 
     // Handle player join/leave events
+    // IMPORTANT: Your game must handle these to add/remove players from game state
     session.on("playerJoined", (info) => {
-      game.addPlayer(info.id);
+      const spawn = this.getSpawnPosition(info.id);
+      game.addPlayer(info.id, spawn.x, spawn.y);
     });
 
     session.on("playerLeft", (info) => {
@@ -186,12 +274,13 @@ class DemoManager {
     });
 
     // Handle desync detection
+    // This fires when the library detects state mismatch between players
     session.on("desync", (tick, localHash, remoteHash) => {
       this.showDesyncFeedback(playerId, tick, localHash, remoteHash);
     });
 
     // Create UI
-    const { panel, canvas, ctx } = this.createPlayerPanel(playerId, isHost);
+    const { panel, canvas, ctx, statsEl } = this.createPlayerPanel(playerId, isHost);
 
     // Store player entry
     const entry: PlayerEntry = {
@@ -202,44 +291,97 @@ class DemoManager {
       canvas,
       ctx,
       panel,
+      statsEl,
+      rollbackCount: 0,
     };
     this.players.set(playerId, entry);
     this.updateAddPlayerButton();
 
-    // Set up room
+    // Set up room - host creates, others join
     if (isHost) {
-      session.createRoom().then(() => {
-        game.addPlayer(playerId);
-        session.start();
-        this.startGameLoop();
-      });
+      session.createRoom()
+        .then(() => {
+          const spawn = this.getSpawnPosition(playerId);
+          game.addPlayer(playerId, spawn.x, spawn.y);
+          session.start();
+          this.startGameLoop();
+        })
+        .catch((error) => {
+          this.showError(`Failed to create room: ${error.message}`);
+          this.removePlayer(playerId);
+        });
     } else {
-      const hostEntry = this.players.values().next().value as PlayerEntry;
-      const hostRoomId = hostEntry.session.roomId;
-      if (!hostRoomId) {
-        console.error("Host room ID not available");
+      const hostEntry = this.getHostEntry();
+      if (!hostEntry) {
+        this.showError("Cannot join: no host found");
+        this.removePlayer(playerId);
         return;
       }
-      session.joinRoom(hostRoomId, hostEntry.id).then(async () => {
-        // In Mesh topology, also connect to all other peers (not just host)
-        if (this.topology === Topology.Mesh) {
-          for (const [id, entry] of this.players) {
-            if (id !== hostEntry.id && id !== playerId) {
-              // Connect both ways for peer-to-peer
-              await transport.connect(id);
-              await entry.transport.connect(playerId);
+      const hostRoomId = hostEntry.session.roomId;
+      if (!hostRoomId) {
+        this.showError("Host room ID not available yet");
+        this.removePlayer(playerId);
+        return;
+      }
+      session.joinRoom(hostRoomId, hostEntry.id)
+        .then(async () => {
+          // In Mesh topology, also connect to all other peers (not just host)
+          if (this.topology === Topology.Mesh) {
+            for (const [id, otherEntry] of this.players) {
+              if (id !== hostEntry.id && id !== playerId) {
+                // Connect both ways for peer-to-peer
+                await transport.connect(id);
+                await otherEntry.transport.connect(playerId);
+              }
             }
           }
-        }
-        // Flush transports to complete handshake
-        this.flushAllTransports();
-      });
+          // Flush transports to complete handshake
+          // Multiple flushes needed for multi-hop delivery in Star topology
+          this.flushAllTransports();
+        })
+        .catch((error) => {
+          this.showError(`Failed to join room: ${error.message}`);
+          this.removePlayer(playerId);
+        });
     }
 
     // Set as active if first player
     if (isHost) {
       this.setActivePlayer(playerId);
     }
+  }
+
+  /**
+   * Get the host player entry (first player added).
+   */
+  private getHostEntry(): PlayerEntry | undefined {
+    return this.players.values().next().value;
+  }
+
+  /**
+   * Get spawn position for a player based on their ID.
+   * Player IDs are "player-N" where N is 1-indexed.
+   */
+  private getSpawnPosition(playerId: string): { x: number; y: number } {
+    // Parse player number from ID (e.g., "player-3" -> 3)
+    const match = playerId.match(/player-(\d+)/);
+    const playerNum = match ? parseInt(match[1], 10) : 1;
+    // Convert to 0-indexed and wrap around spawn positions array
+    const index = (playerNum - 1) % SPAWN_POSITIONS.length;
+    const pos = SPAWN_POSITIONS[index];
+    return {
+      x: pos.x * CANVAS_WIDTH,
+      y: pos.y * CANVAS_HEIGHT,
+    };
+  }
+
+  /**
+   * Show an error message to the user.
+   */
+  private showError(message: string): void {
+    console.error(message);
+    // Could also show a toast/modal in a production app
+    alert(message);
   }
 
   /**
@@ -290,6 +432,7 @@ class DemoManager {
     panel: HTMLElement;
     canvas: HTMLCanvasElement;
     ctx: CanvasRenderingContext2D;
+    statsEl: HTMLElement;
   } {
     const container = document.getElementById("players-container")!;
 
@@ -300,12 +443,17 @@ class DemoManager {
     const header = document.createElement("div");
     header.className = "player-header";
     header.innerHTML = `
-      <span class="player-name">${playerId}${isHost ? " (host)" : ""}</span>
+      <div class="player-info">
+        <span class="player-name">${playerId}${isHost ? " (host)" : ""}</span>
+        <span class="player-stats"></span>
+      </div>
       <div class="player-buttons">
-        <button class="btn-desync">Induce Desync</button>
+        <button class="btn-desync">Desync</button>
         <button class="btn-disconnect">Disconnect</button>
       </div>
     `;
+
+    const statsEl = header.querySelector(".player-stats") as HTMLElement;
 
     const canvas = document.createElement("canvas");
     canvas.width = CANVAS_WIDTH;
@@ -334,7 +482,7 @@ class DemoManager {
 
     const ctx = canvas.getContext("2d")!;
 
-    return { panel, canvas, ctx };
+    return { panel, canvas, ctx, statsEl };
   }
 
   /**
@@ -390,9 +538,13 @@ class DemoManager {
 
   /**
    * Flush all transports to deliver pending messages.
+   *
+   * Multiple iterations are needed because in Star topology, a message
+   * from player A to player B goes: A → Host → B (2 hops).
+   * Each flush() only delivers messages queued at that moment.
    */
   private flushAllTransports(): void {
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < FLUSH_ITERATIONS; i++) {
       for (const entry of this.players.values()) {
         entry.transport.flush();
       }
@@ -442,14 +594,17 @@ class DemoManager {
    * time-based delivery to simulate realistic network conditions.
    */
   private tick(): void {
+    const input = this.getInput();
+    const now = performance.now();
+
     if (this.simulatedLatency === 0) {
       // Zero-latency mode: interleave flushes for instant delivery
       this.flushAllTransportsOnce();
 
-      const input = this.getInput();
       for (const entry of this.players.values()) {
         const playerInput = entry.id === this.activePlayerId ? input : new Uint8Array([0]);
-        entry.session.tick(playerInput);
+        const result = entry.session.tick(playerInput);
+        this.trackRollback(entry, result, now);
         this.flushAllTransportsOnce();
       }
     } else {
@@ -460,11 +615,24 @@ class DemoManager {
       }
 
       // Tick all sessions
-      const input = this.getInput();
       for (const entry of this.players.values()) {
         const playerInput = entry.id === this.activePlayerId ? input : new Uint8Array([0]);
-        entry.session.tick(playerInput);
+        const result = entry.session.tick(playerInput);
+        this.trackRollback(entry, result, now);
       }
+    }
+  }
+
+  /**
+   * Track rollback events and update stats.
+   */
+  private trackRollback(
+    entry: PlayerEntry,
+    result: { rolledBack: boolean; rollbackTicks?: number },
+    _now: number
+  ): void {
+    if (result.rolledBack) {
+      entry.rollbackCount++;
     }
   }
 
@@ -478,12 +646,34 @@ class DemoManager {
   }
 
   /**
-   * Render all game views.
+   * Render all game views and update stats.
    */
   private render(): void {
     for (const entry of this.players.values()) {
       entry.game.draw(entry.ctx, entry.id);
+      this.updateStats(entry);
     }
+  }
+
+  /**
+   * Update the stats display for a player.
+   * Shows rollback count and simulated latency (RTT).
+   */
+  private updateStats(entry: PlayerEntry): void {
+    const parts: string[] = [];
+
+    // Rollback count
+    if (entry.rollbackCount > 0) {
+      parts.push(`Rollbacks: ${entry.rollbackCount}`);
+    }
+
+    // Simulated latency (shown as RTT = 2x one-way latency)
+    if (this.simulatedLatency > 0) {
+      const rtt = this.simulatedLatency * 2;
+      parts.push(`RTT: ~${rtt}ms`);
+    }
+
+    entry.statsEl.textContent = parts.length > 0 ? parts.join(" | ") : "";
   }
 }
 
