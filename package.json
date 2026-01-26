@@ -21,13 +21,15 @@
   },
   "homepage": "https://someusername6.github.io/rollback-netcode",
   "scripts": {
+    "clean": "rm -rf dist",
     "build": "tsc",
     "build:demo": "node esbuild.demo.mjs",
     "serve:demo": "npm run build:demo && npx http-server demo -p 3000 -c-1",
     "test": "node --import tsx --test tests/*.test.ts tests/**/*.test.ts",
     "lint": "biome check src/",
     "format": "biome format --write src/",
-    "benchmark": "node --import tsx src/benchmark.ts"
+    "benchmark": "node --import tsx src/benchmark.ts",
+    "prepublishOnly": "npm run clean && npm run build && npm run lint && npm test"
   },
   "keywords": [
     "netcode",
