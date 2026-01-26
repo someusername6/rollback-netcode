@@ -24,7 +24,7 @@
     "clean": "rm -rf dist",
     "build": "tsc",
     "build:demo": "node esbuild.demo.mjs",
-    "serve:demo": "npm run build:demo && npx http-server demo -p 3000 -c-1",
+    "serve:demo": "npm run build:demo && npx http-server examples/local-transport -p 3000 -c-1",
     "test": "node --import tsx --test tests/*.test.ts tests/**/*.test.ts",
     "lint": "biome check src/",
     "format": "biome format --write src/",

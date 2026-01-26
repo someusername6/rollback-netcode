@@ -1,0 +1,5 @@
+# Build output
+client.js
+
+# Dependencies
+node_modules/

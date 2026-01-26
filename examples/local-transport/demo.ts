@@ -39,8 +39,8 @@ import {
   Topology,
   DesyncAuthority,
   asPlayerId,
-} from "../src/index.js";
-import type { Session, PlayerId } from "../src/index.js";
+} from "../../src/index.js";
+import type { Session, PlayerId } from "../../src/index.js";
 import { DotGame, Input, CANVAS_WIDTH, CANVAS_HEIGHT } from "./game.js";
 
 /** Tick rate in Hz - how many simulation steps per second */

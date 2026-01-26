@@ -1,0 +1,14 @@
+{
+  "name": "webrtc-local-demo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npx esbuild client.ts --bundle --format=esm --outfile=client.js --platform=browser",
+    "server": "npx tsx server.ts",
+    "start": "npm run build && npm run server"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

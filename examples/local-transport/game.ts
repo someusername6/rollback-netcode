@@ -26,7 +26,7 @@
  *    - Auto-add unknown players if input arrives for them
  */
 
-import type { Game, PlayerId } from "../src/types.js";
+import type { Game, PlayerId } from "../../src/types.js";
 
 /** Player state: position and color */
 export interface DotState {

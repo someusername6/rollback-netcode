@@ -1,9 +1,9 @@
 import * as esbuild from "esbuild";
 
 await esbuild.build({
-  entryPoints: ["demo/demo.ts"],
+  entryPoints: ["examples/local-transport/demo.ts"],
   bundle: true,
-  outfile: "demo/demo.js",
+  outfile: "examples/local-transport/demo.js",
   format: "esm",
   platform: "browser",
   target: ["es2022"],
@@ -11,4 +11,4 @@ await esbuild.build({
   minify: process.argv.includes("--minify"),
 });
 
-console.log("Demo built successfully: demo/demo.js");
+console.log("Demo built successfully: examples/local-transport/demo.js");
