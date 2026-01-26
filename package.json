@@ -17,7 +17,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/someusername6/rollback-netcode.git"
+    "url": "git+https://github.com/someusername6/rollback-netcode.git"
   },
   "homepage": "https://someusername6.github.io/rollback-netcode",
   "scripts": {
