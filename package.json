@@ -5,9 +5,21 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": null
+    }
+  },
   "files": [
     "dist"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/someusername6/rollback-netcode.git"
+  },
+  "homepage": "https://someusername6.github.io/rollback-netcode",
   "scripts": {
     "build": "tsc",
     "build:demo": "node esbuild.demo.mjs",
@@ -27,7 +39,7 @@
     "networking",
     "ggpo"
   ],
-  "author": "",
+  "author": "someusername6",
   "license": "MIT",
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",

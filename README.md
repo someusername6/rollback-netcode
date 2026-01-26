@@ -1,8 +1,13 @@
 # Rollback Netcode
 
+[![npm version](https://img.shields.io/npm/v/rollback-netcode)](https://www.npmjs.com/package/rollback-netcode)
+[![license](https://img.shields.io/npm/l/rollback-netcode)](https://github.com/someusername6/rollback-netcode/blob/main/LICENSE)
+
 > **Note:** This library is under active development. APIs may change.
 
 A TypeScript library for P2P rollback netcode in browser-based multiplayer games. Supports 4+ players with WebRTC—no dedicated server required.
+
+**Written in TypeScript with full type definitions included.**
 
 **[Live Demo](https://someusername6.github.io/rollback-netcode)** - Try the library without installing anything
 
@@ -235,11 +240,14 @@ const transport = new WebRTCTransport(localPeerId, {
 
 // LocalTransport for testing
 import { LocalTransport, createLocalTransportGroup } from 'rollback-netcode';
-const [t1, t2, t3] = createLocalTransportGroup(['p1', 'p2', 'p3'], {
+const transports = createLocalTransportGroup(['p1', 'p2', 'p3'], {
   latency: 50,      // Simulated latency (ms)
   jitter: 10,       // Latency variation (ms)
   packetLoss: 0.01  // 1% packet loss
 });
+const t1 = transports.get('p1')!;
+const t2 = transports.get('p2')!;
+const t3 = transports.get('p3')!;
 
 // TransformingTransport for large messages
 import { TransformingTransport } from 'rollback-netcode';
@@ -261,9 +269,11 @@ import {
 } from 'rollback-netcode';
 
 // Create linked transports with simulated latency
-const [t1, t2] = createLocalTransportGroup(['host', 'client'], {
+const transports = createLocalTransportGroup(['host', 'client'], {
   latency: 50,  // 50ms one-way latency
 });
+const t1 = transports.get('host')!;
+const t2 = transports.get('client')!;
 
 // Create your game instances
 const hostGame = new MyGame();
@@ -335,7 +345,11 @@ Yes. The library is framework-agnostic. It works with:
 ## Requirements
 
 - Node.js >= 22.0.0 (for development)
-- Modern browser with WebRTC support (for production)
+- Modern browser with WebRTC support (for production):
+  - Chrome 56+
+  - Firefox 44+
+  - Safari 11+
+  - Edge 79+
 
 ### Dependencies
 
