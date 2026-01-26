@@ -26,6 +26,7 @@ jobs:
         with:
           node-version: '22'
           cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
         run: npm ci
@@ -39,7 +40,11 @@ jobs:
       - name: Publish to npm (dry run)
         if: inputs.dry-run == true
         run: npm publish --dry-run
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish to npm with provenance
         if: inputs.dry-run != true
         run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
