@@ -2,6 +2,8 @@
 
 A TypeScript library for P2P rollback netcode in browser-based multiplayer games. Supports 4+ players with WebRTC—no dedicated server required.
 
+**[Live Demo](https://someusername6.github.io/rollback-netcode)** - Try the library without installing anything
+
 ## Features
 
 - **Rollback netcode** - Simulate optimistically, rollback and resimulate on misprediction
@@ -12,6 +14,7 @@ A TypeScript library for P2P rollback netcode in browser-based multiplayer games
 - **Topology options** - P2P mesh or star-through-host
 - **Desync detection** - Periodic state hashing with automatic recovery
 - **Large message support** - Built-in compression and segmentation for state sync
+- **Bandwidth efficient** - Only inputs transmitted during gameplay; state sync only on join/desync
 
 ## Installation
 
@@ -89,8 +92,8 @@ signalingServer.onSignal((fromPeerId, signal) => {
 const session = createSession({ game, transport });
 
 // Listen for events
-session.on('playerJoined', (playerId) => console.log(`${playerId} joined`));
-session.on('playerLeft', (playerId) => console.log(`${playerId} left`));
+session.on('playerJoined', (player) => console.log(`${player.id} joined`));
+session.on('playerLeft', (player) => console.log(`${player.id} left`));
 session.on('desync', () => console.log('Desync detected, recovering...'));
 ```
 
@@ -98,10 +101,10 @@ session.on('desync', () => console.log('Desync detected, recovering...'));
 
 ```typescript
 // Host creates a room
-const roomId = await session.createRoom({ maxPlayers: 4 });
+const roomId = await session.createRoom();
 console.log(`Room created: ${roomId}`);
 
-// Other players join
+// Other players join (need to know the host's peer ID)
 await session.joinRoom(roomId, hostPeerId);
 ```
 
@@ -109,7 +112,7 @@ await session.joinRoom(roomId, hostPeerId);
 
 ```typescript
 // Host starts the game when ready
-session.startGame();
+session.start();
 
 // Game loop (call at your tick rate, e.g., 60 FPS)
 function gameLoop() {
@@ -169,9 +172,9 @@ const session = createSession({
 });
 
 // Session methods
-session.createRoom(options?)     // Host a new room
+session.createRoom()             // Host a new room
 session.joinRoom(roomId, hostPeerId)  // Join existing room
-session.startGame()              // Begin gameplay (host only)
+session.start()                  // Begin gameplay (host only)
 session.tick(localInput)         // Advance simulation
 session.pause()                  // Pause game (host only)
 session.resume()                 // Resume game (host only)
@@ -189,12 +192,14 @@ session.currentTick              // Current simulation tick
 
 ```typescript
 session.on('stateChange', (newState, oldState) => {});
-session.on('playerJoined', (playerId, playerInfo) => {});
-session.on('playerLeft', (playerId, reason) => {});
-session.on('gameStart', (tick) => {});
+session.on('playerJoined', (playerInfo) => {});
+session.on('playerLeft', (playerInfo) => {});
+session.on('gameStart', () => {});
 session.on('desync', (tick, localHash, remoteHash) => {});
-session.on('rollback', (fromTick, toTick) => {});
 session.on('error', (error, context) => {});
+session.on('lagReport', (laggyPlayerId, ticksBehind) => {});
+session.on('resumeCountdown', (secondsRemaining) => {});
+session.on('playerDropped', (playerId, metadata?) => {});
 ```
 
 ### Configuration
@@ -244,40 +249,44 @@ const transport = new TransformingTransport(innerTransport, {
 
 ## Testing Your Game
 
-The library provides utilities for testing:
+Use `LocalTransport` for deterministic testing without real network connections:
 
 ```typescript
 import {
-  TestGame,
-  createTestSession,
+  createSession,
   LocalTransport,
   createLocalTransportGroup,
-  flushAllTransports
 } from 'rollback-netcode';
 
-// Create linked transports
-const [t1, t2] = createLocalTransportGroup(['host', 'client']);
+// Create linked transports with simulated latency
+const [t1, t2] = createLocalTransportGroup(['host', 'client'], {
+  latency: 50,  // 50ms one-way latency
+});
+
+// Create your game instances
+const hostGame = new MyGame();
+const clientGame = new MyGame();
 
 // Create sessions
-const hostSession = createTestSession({ transport: t1 });
-const clientSession = createTestSession({ transport: t2 });
+const hostSession = createSession({ game: hostGame, transport: t1 });
+const clientSession = createSession({ game: clientGame, transport: t2 });
 
-// Set up game
-await hostSession.session.createRoom();
-await clientSession.session.joinRoom('room', 'host');
-hostSession.session.startGame();
+// Set up room
+await hostSession.createRoom();
+await clientSession.joinRoom('room', 'host');
+hostSession.start();
 
-// Simulate ticks
+// Simulate ticks - flush transports to deliver messages
 for (let i = 0; i < 100; i++) {
-  hostSession.session.tick(new Uint8Array([1]));
-  clientSession.session.tick(new Uint8Array([2]));
-  flushAllTransports([t1, t2]);
+  hostSession.tick(new Uint8Array([1]));
+  clientSession.tick(new Uint8Array([2]));
+  // Advance time and deliver messages
+  t1.tick(16);  // Simulate 16ms passing
+  t2.tick(16);
 }
 
 // Verify state matches
-const hostHash = hostSession.game.hash();
-const clientHash = clientSession.game.hash();
-assert(hostHash === clientHash, 'States should match');
+assert(hostGame.hash() === clientGame.hash(), 'States should match');
 ```
 
 ## FAQ
@@ -305,6 +314,12 @@ The rollback algorithm handles latency automatically. High-latency players will 
 ### How large can my game state be?
 
 With `TransformingTransport`, states up to ~64MB are supported (compressed and segmented). For best performance, keep serialized state under a few hundred KB. Consider delta compression for large states.
+
+### How much bandwidth does it use?
+
+During normal gameplay, only player inputs are transmitted—not world state. This keeps bandwidth proportional to player count, not world complexity (number of entities, physics objects, etc.). Full state is only sent during:
+- Initial state sync when a player joins
+- Desync recovery (rare with deterministic simulation)
 
 ### Can I use this with my favorite game framework?
 

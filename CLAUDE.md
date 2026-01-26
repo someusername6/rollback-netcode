@@ -6,9 +6,9 @@ This is a TypeScript library for P2P rollback netcode in browser-based multiplay
 
 ## Key Documents
 
-- `README.md` - Project overview and goals
+- `README.md` - Project overview, quick start, and API reference
 - `docs/architecture.md` - Technical design, components, data structures
-- `docs/requirements.md` - Detailed functional and non-functional requirements
+- `docs/configuration-tuning.md` - Performance tuning guide
 
 **Read these documents before implementing.**
 
@@ -38,22 +38,42 @@ This is a TypeScript library for P2P rollback netcode in browser-based multiplay
 src/
   index.ts              # Public API exports
   types.ts              # Shared type definitions
+  debug.ts              # Debug logging utilities
+  benchmark.ts          # Performance benchmarks
   session/
     session.ts          # Session manager
-    session.test.ts
+    topology.ts         # Star/Mesh topology strategies
+    player-manager.ts   # Player tracking
+    message-router.ts   # Message dispatching
+    message-builders.ts # Message construction helpers
+    desync-manager.ts   # Desync detection and recovery
+    lag-monitor.ts      # Lag detection and reporting
   rollback/
     engine.ts           # Rollback engine
     snapshot-buffer.ts  # Ring buffer for snapshots
     input-buffer.ts     # Per-player input tracking
-    engine.test.ts
   transport/
     adapter.ts          # Transport interface
     webrtc.ts           # WebRTC implementation
     local.ts            # Local/mock transport for testing
-    local.test.ts
+    transforming.ts     # Compression/segmentation wrapper
   protocol/
     messages.ts         # Message type definitions
     encoding.ts         # Binary encoding/decoding
+  utils/
+    rate-limiter.ts     # Rate limiting for join requests
+
+tests/
+  *.test.ts             # Test files organized by component
+  utils/
+    test-game.ts        # Test game implementation
+    test-helpers.ts     # Shared test utilities
+
+demo/
+  index.html            # Demo page
+  demo.ts               # Demo logic
+  game.ts               # DotGame implementation
+  styles.css            # Styling
 ```
 
 ## Implementation Order
@@ -101,19 +121,24 @@ const game: Game = {
   hash: () => { /* return number */ },
 };
 
-// Create session
-const session = createSession({
-  game,
-  transport: new WebRTCTransport(rtcConfig),
-  playerId: 'player-1',
-  tickRate: 60,
+// Create transport with signaling
+const transport = new WebRTCTransport('player-1', {
+  onSignal: async (peerId, signal) => {
+    // Send signal to peer via your signaling server
+  }
 });
 
+// Create session
+const session = createSession({ game, transport });
+
 // Host creates room
-const roomId = await session.createRoom({ maxPlayers: 4 });
+const roomId = await session.createRoom();
 
 // Others join
-await session.joinRoom(roomId);
+await session.joinRoom(roomId, hostPeerId);
+
+// Host starts the game
+session.start();
 
 // Game loop
 function tick() {

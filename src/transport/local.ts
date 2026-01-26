@@ -216,6 +216,9 @@ export class LocalTransport implements TransportAdapter {
 	public onDisconnect: ((peerId: string) => void) | null = null;
 	public onError: ((peerId: string | null, error: Error, context: string) => void) | null = null;
 
+	/** Callback for keepalive ping - set by Session to send Ping messages */
+	public onKeepalivePing: ((peerId: string) => void) | null = null;
+
 	private readonly _connectedPeers: Set<string> = new Set();
 	private readonly linkedTransports: Map<string, LocalTransport> = new Map();
 	private readonly pendingMessages: MessageHeap = new MessageHeap();
@@ -472,6 +475,18 @@ export class LocalTransport implements TransportAdapter {
 			return this.random.next();
 		}
 		return Math.random();
+	}
+
+	/**
+	 * Trigger keepalive pings for all connected peers.
+	 * Call this periodically to trigger RTT measurement.
+	 * The Session will handle the actual Ping/Pong and RTT calculation.
+	 */
+	triggerKeepalive(): void {
+		if (!this.onKeepalivePing) return;
+		for (const peerId of this._connectedPeers) {
+			this.onKeepalivePing(peerId);
+		}
 	}
 }
 

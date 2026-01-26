@@ -60,6 +60,9 @@ interface SessionEvents {
   desync: (tick: Tick, localHash: number, remoteHash: number) => void;
   gameStart: () => void;
   error: (error: Error, context: ErrorContext) => void;
+  lagReport: (laggyPlayerId: PlayerId, ticksBehind: number) => void;
+  resumeCountdown: (secondsRemaining: number) => void;
+  playerDropped: (playerId: PlayerId, metadata?: Uint8Array) => void;
 }
 ```
 
@@ -276,29 +279,62 @@ Leaving Player               Host/Peers
       │                          │    from player at that tick)
 ```
 
+## Bandwidth Model
+
+During normal gameplay, **only player inputs are transmitted**—not world state. Each client simulates the game locally using received inputs.
+
+**What gets transmitted:**
+- Player inputs (small, fixed size per player per tick)
+- Input acknowledgments
+- Periodic state hashes (just tick + 4-byte hash for desync detection)
+- Ping/pong for latency measurement
+
+**What is NOT transmitted during gameplay:**
+- Entity positions, velocities, or other world state
+- Game objects, physics state, etc.
+
+**Full state is only transmitted for:**
+1. Initial sync when a player joins
+2. Desync recovery (rare with deterministic simulation)
+
+This approach keeps bandwidth proportional to player count, not world complexity. A game with 1000 entities uses the same bandwidth as one with 10 entities.
+
+**Trade-off:** Requires deterministic simulation. Given the same inputs, `step()` must produce identical results on all clients.
+
 ## Message Protocol
 
 ### Message Types
 
 ```typescript
 enum MessageType {
-  Input = 1,         // Player input for a tick
-  InputAck = 2,      // Acknowledgment of received input
-  Hash = 3,          // State hash for desync detection
-  Sync = 4,          // Request for state sync
-  StateSync = 5,     // Full state synchronization
-  JoinRequest = 6,   // Request to join session
-  JoinAccept = 7,    // Acceptance of join request
-  Pause = 8,         // Pause game
-  Resume = 9,        // Resume game
-  PlayerJoined = 10, // Notification of new player
-  PlayerLeft = 11,   // Notification of player leaving
-  Ping = 12,         // Latency measurement
-  Pong = 13,         // Latency response
-  LagReport = 14,    // Report of lagging player
-  DisconnectReport = 15,  // Report of disconnection
-  DropPlayer = 16,   // Command to drop a player
-  ResumeCountdown = 17,   // Countdown to resume
+  // Input messages (unreliable)
+  Input = 0x01,           // Player input for a tick
+  InputAck = 0x02,        // Acknowledgment of received input
+
+  // Sync messages (reliable)
+  Hash = 0x10,            // State hash for desync detection
+  Sync = 0x11,            // Full state synchronization (desync recovery)
+  SyncRequest = 0x12,     // Request for state sync
+
+  // Session control (reliable)
+  Pause = 0x20,           // Pause game
+  Resume = 0x21,          // Resume game
+  LagReport = 0x22,       // Report of lagging player
+  DisconnectReport = 0x23, // Report of disconnection
+  ResumeCountdown = 0x24, // Countdown to resume
+  DropPlayer = 0x25,      // Command to drop a player
+
+  // Room management (reliable)
+  JoinRequest = 0x30,     // Request to join session
+  JoinAccept = 0x31,      // Acceptance of join request
+  JoinReject = 0x32,      // Rejection of join request
+  StateSync = 0x33,       // Full state sync for late join
+  PlayerJoined = 0x34,    // Notification of new player
+  PlayerLeft = 0x35,      // Notification of player leaving
+
+  // Ping/Pong (unreliable)
+  Ping = 0x40,            // Latency measurement
+  Pong = 0x41,            // Latency response
 }
 ```
 
@@ -487,11 +523,16 @@ Run identical inputs on two separate game instances and compare final state hash
 src/
   index.ts              # Public API exports
   types.ts              # Core type definitions
+  debug.ts              # Debug logging utilities
+  benchmark.ts          # Performance benchmarks
   session/
     session.ts          # Session manager
     topology.ts         # Star/Mesh topology strategies
     player-manager.ts   # Player tracking
     message-router.ts   # Message dispatching
+    message-builders.ts # Message construction helpers
+    desync-manager.ts   # Desync detection and recovery
+    lag-monitor.ts      # Lag detection and reporting
   rollback/
     engine.ts           # Rollback engine
     snapshot-buffer.ts  # Ring buffer for snapshots
@@ -499,9 +540,11 @@ src/
   transport/
     adapter.ts          # Transport interface
     webrtc.ts           # WebRTC implementation
-    local.ts            # Local/mock transport
+    local.ts            # Local/mock transport for testing
     transforming.ts     # Compression/segmentation wrapper
   protocol/
     messages.ts         # Message type definitions
     encoding.ts         # Binary encoding/decoding
+  utils/
+    rate-limiter.ts     # Rate limiting for join requests
 ```

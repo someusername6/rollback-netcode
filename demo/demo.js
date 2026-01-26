@@ -3072,6 +3072,10 @@ var Session = class _Session {
   pendingHashMessages = [];
   /** Tracks players whose playerJoined event has been emitted to prevent duplicates during resimulation */
   emittedJoinEvents = /* @__PURE__ */ new Set();
+  /** Number of RTT samples to keep for averaging */
+  static RTT_SAMPLE_COUNT = 5;
+  /** RTT tracking: peerId -> { pendingPings: Map<timestamp, sendTime>, rtt: number } */
+  peerRttData = /* @__PURE__ */ new Map();
   /**
    * Create a new session.
    * @throws ValidationError if config values are invalid
@@ -3673,6 +3677,7 @@ var Session = class _Session {
    */
   handlePeerDisconnect(peerId) {
     this.debug.log("Peer disconnected", { peerId });
+    this.peerRttData.delete(peerId);
     const playerId = asPlayerId(peerId);
     if (this.desyncManager.isHostAuthority && !this._isHost) {
       this.sendToHost(createDisconnectReport(playerId));
@@ -4076,13 +4081,20 @@ var Session = class _Session {
     );
   }
   /**
-   * Handle pong message - record RTT for metrics.
+   * Handle pong message - calculate RTT.
    */
   handlePong(peerId, message) {
-    if (this.transport.getConnectionMetrics) {
-      const transport = this.transport;
-      transport.recordPongReceived?.(peerId, message.timestamp);
+    const data = this.peerRttData.get(peerId);
+    if (!data) return;
+    const sentAt = data.pendingPings.get(message.timestamp);
+    if (sentAt === void 0) return;
+    const rtt = Date.now() - sentAt;
+    data.pendingPings.delete(message.timestamp);
+    data.samples.push(rtt);
+    if (data.samples.length > _Session.RTT_SAMPLE_COUNT) {
+      data.samples.shift();
     }
+    data.rtt = data.samples.reduce((a, b) => a + b, 0) / data.samples.length;
   }
   /**
    * Send a ping to a peer for RTT measurement.
@@ -4092,8 +4104,21 @@ var Session = class _Session {
   sendPing(peerId) {
     const timestamp = Date.now();
     this.transport.send(peerId, encodeMessage(createPing(timestamp)), false);
-    const transport = this.transport;
-    transport.recordPingSent?.(peerId, timestamp);
+    let data = this.peerRttData.get(peerId);
+    if (!data) {
+      data = { pendingPings: /* @__PURE__ */ new Map(), rtt: 0, samples: [] };
+      this.peerRttData.set(peerId, data);
+    }
+    data.pendingPings.set(timestamp, timestamp);
+  }
+  /**
+   * Get the measured RTT to a peer in milliseconds.
+   * Returns 0 if no RTT data is available yet.
+   *
+   * @param peerId - The peer to get RTT for
+   */
+  getRtt(peerId) {
+    return this.peerRttData.get(peerId)?.rtt ?? 0;
   }
   /**
    * Broadcast input to all peers with redundancy.
@@ -4338,6 +4363,8 @@ var LocalTransport = class {
   onConnect = null;
   onDisconnect = null;
   onError = null;
+  /** Callback for keepalive ping - set by Session to send Ping messages */
+  onKeepalivePing = null;
   _connectedPeers = /* @__PURE__ */ new Set();
   linkedTransports = /* @__PURE__ */ new Map();
   pendingMessages = new MessageHeap();
@@ -4534,6 +4561,17 @@ var LocalTransport = class {
       return this.random.next();
     }
     return Math.random();
+  }
+  /**
+   * Trigger keepalive pings for all connected peers.
+   * Call this periodically to trigger RTT measurement.
+   * The Session will handle the actual Ping/Pong and RTT calculation.
+   */
+  triggerKeepalive() {
+    if (!this.onKeepalivePing) return;
+    for (const peerId of this._connectedPeers) {
+      this.onKeepalivePing(peerId);
+    }
   }
 };
 
@@ -8916,6 +8954,7 @@ var TICK_MS = 1e3 / TICK_RATE;
 var HASH_INTERVAL = 30;
 var FLUSH_ITERATIONS = 5;
 var JITTER_RATIO = 0.2;
+var KEEPALIVE_INTERVAL_TICKS = 30;
 var SPAWN_POSITIONS = [
   { x: 0.25, y: 0.25 },
   // top-left quadrant
@@ -8953,6 +8992,7 @@ var DemoManager = class {
   lastTickTime = 0;
   accumulator = 0;
   running = false;
+  tickCounter = 0;
   topology = 1 /* Star */;
   desyncAuthority = 0 /* Host */;
   simulatedLatency = 0;
@@ -9329,6 +9369,8 @@ var DemoManager = class {
   tick() {
     const input = this.getInput();
     const now = performance.now();
+    this.tickCounter++;
+    const shouldPing = this.tickCounter % KEEPALIVE_INTERVAL_TICKS === 0;
     if (this.simulatedLatency === 0) {
       this.flushAllTransportsOnce();
       for (const entry of this.players.values()) {
@@ -9337,9 +9379,16 @@ var DemoManager = class {
         this.trackRollback(entry, result, now);
         this.flushAllTransportsOnce();
       }
+      if (shouldPing) {
+        this.sendPingsToHost();
+        this.flushAllTransportsOnce();
+      }
     } else {
       for (const entry of this.players.values()) {
         entry.transport.tick(TICK_MS);
+      }
+      if (shouldPing) {
+        this.sendPingsToHost();
       }
       for (const entry of this.players.values()) {
         const playerInput = entry.id === this.activePlayerId ? input : new Uint8Array([0]);
@@ -9354,6 +9403,18 @@ var DemoManager = class {
   trackRollback(entry, result, _now) {
     if (result.rolledBack) {
       entry.rollbackCount++;
+    }
+  }
+  /**
+   * Send pings from all non-host players to the host for RTT measurement.
+   */
+  sendPingsToHost() {
+    const hostEntry = this.getHostEntry();
+    if (!hostEntry) return;
+    for (const entry of this.players.values()) {
+      if (entry.id !== hostEntry.id) {
+        entry.session.sendPing(hostEntry.id);
+      }
     }
   }
   /**
@@ -9377,7 +9438,19 @@ var DemoManager = class {
    * Update the stats display for a player.
    */
   updateStats(entry) {
-    entry.statsEl.textContent = entry.rollbackCount > 0 ? `Rollbacks: ${entry.rollbackCount}` : "";
+    const hostEntry = this.getHostEntry();
+    const isHost = hostEntry?.id === entry.id;
+    const parts = [];
+    if (!isHost && hostEntry) {
+      const rtt = entry.session.getRtt(hostEntry.id);
+      if (rtt > 0) {
+        parts.push(`RTT: ${Math.round(rtt)}ms`);
+      }
+    }
+    if (entry.rollbackCount > 0) {
+      parts.push(`Rollbacks: ${entry.rollbackCount}`);
+    }
+    entry.statsEl.textContent = parts.join(" | ");
   }
 };
 document.addEventListener("DOMContentLoaded", () => {

@@ -53,6 +53,8 @@ const HASH_INTERVAL = 30; // = 0.5 seconds at 60Hz
 const FLUSH_ITERATIONS = 5;
 /** Jitter as percentage of latency (20% is realistic for internet) */
 const JITTER_RATIO = 0.2;
+/** How often to trigger keepalive pings (in ticks) */
+const KEEPALIVE_INTERVAL_TICKS = 30; // every 0.5s at 60Hz
 
 /**
  * Predefined spawn positions as fractions of canvas size.
@@ -105,6 +107,7 @@ class DemoManager {
   private lastTickTime = 0;
   private accumulator = 0;
   private running = false;
+  private tickCounter = 0;
 
   private topology: Topology = Topology.Star;
   private desyncAuthority: DesyncAuthority = DesyncAuthority.Host;
@@ -596,6 +599,10 @@ class DemoManager {
   private tick(): void {
     const input = this.getInput();
     const now = performance.now();
+    this.tickCounter++;
+
+    // Trigger keepalive pings periodically for RTT measurement
+    const shouldPing = this.tickCounter % KEEPALIVE_INTERVAL_TICKS === 0;
 
     if (this.simulatedLatency === 0) {
       // Zero-latency mode: interleave flushes for instant delivery
@@ -607,11 +614,22 @@ class DemoManager {
         this.trackRollback(entry, result, now);
         this.flushAllTransportsOnce();
       }
+
+      // Send pings for RTT measurement (RTT will be ~0 in zero-latency mode)
+      if (shouldPing) {
+        this.sendPingsToHost();
+        this.flushAllTransportsOnce();
+      }
     } else {
       // Simulated latency mode: use time-based delivery
       // Advance transport time and deliver due messages
       for (const entry of this.players.values()) {
         entry.transport.tick(TICK_MS);
+      }
+
+      // Send pings for RTT measurement
+      if (shouldPing) {
+        this.sendPingsToHost();
       }
 
       // Tick all sessions
@@ -633,6 +651,21 @@ class DemoManager {
   ): void {
     if (result.rolledBack) {
       entry.rollbackCount++;
+    }
+  }
+
+  /**
+   * Send pings from all non-host players to the host for RTT measurement.
+   */
+  private sendPingsToHost(): void {
+    const hostEntry = this.getHostEntry();
+    if (!hostEntry) return;
+
+    for (const entry of this.players.values()) {
+      if (entry.id !== hostEntry.id) {
+        // Non-host players ping the host
+        entry.session.sendPing(hostEntry.id);
+      }
     }
   }
 
@@ -659,9 +692,25 @@ class DemoManager {
    * Update the stats display for a player.
    */
   private updateStats(entry: PlayerEntry): void {
-    entry.statsEl.textContent = entry.rollbackCount > 0
-      ? `Rollbacks: ${entry.rollbackCount}`
-      : "";
+    const hostEntry = this.getHostEntry();
+    const isHost = hostEntry?.id === entry.id;
+
+    const parts: string[] = [];
+
+    // Show RTT to host (for non-host players)
+    if (!isHost && hostEntry) {
+      const rtt = entry.session.getRtt(hostEntry.id);
+      if (rtt > 0) {
+        parts.push(`RTT: ${Math.round(rtt)}ms`);
+      }
+    }
+
+    // Show rollback count
+    if (entry.rollbackCount > 0) {
+      parts.push(`Rollbacks: ${entry.rollbackCount}`);
+    }
+
+    entry.statsEl.textContent = parts.join(" | ");
   }
 }
 

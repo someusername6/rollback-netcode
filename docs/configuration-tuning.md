@@ -19,6 +19,8 @@ interface SessionConfig {
   desyncAuthority: DesyncAuthority;  // Who resolves desyncs (default: Peer)
   lagReportThreshold: number;    // Ticks behind before reporting lag (default: 30)
   inputRedundancy: number;       // Inputs per message for reliability (default: 3)
+  joinRateLimitRequests: number; // Max join requests per window (default: 3)
+  joinRateLimitWindowMs: number; // Rate limit window in ms (default: 10000)
 }
 ```
 

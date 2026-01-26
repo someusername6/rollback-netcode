@@ -164,6 +164,15 @@ export class Session {
 	/** Tracks players whose playerJoined event has been emitted to prevent duplicates during resimulation */
 	private readonly emittedJoinEvents: Set<PlayerId> = new Set();
 
+	/** Number of RTT samples to keep for averaging */
+	private static readonly RTT_SAMPLE_COUNT = 5;
+
+	/** RTT tracking: peerId -> { pendingPings: Map<timestamp, sendTime>, rtt: number } */
+	private readonly peerRttData: Map<
+		string,
+		{ pendingPings: Map<number, number>; rtt: number; samples: number[] }
+	> = new Map();
+
 	/**
 	 * Create a new session.
 	 * @throws ValidationError if config values are invalid
@@ -933,6 +942,9 @@ export class Session {
 	private handlePeerDisconnect(peerId: string): void {
 		this.debug.log("Peer disconnected", { peerId });
 
+		// Clean up RTT tracking data
+		this.peerRttData.delete(peerId);
+
 		const playerId = asPlayerId(peerId);
 
 		// In host-authority mode, guests report to host instead of handling locally
@@ -1496,20 +1508,28 @@ export class Session {
 	}
 
 	/**
-	 * Handle pong message - record RTT for metrics.
+	 * Handle pong message - calculate RTT.
 	 */
 	private handlePong(
 		peerId: string,
 		message: Message & { type: MessageType.Pong },
 	): void {
-		// Record the pong for RTT calculation if transport supports metrics
-		if (this.transport.getConnectionMetrics) {
-			// The transport needs to track this - call recordPongReceived if available
-			const transport = this.transport as {
-				recordPongReceived?: (peerId: string, timestamp: number) => void;
-			};
-			transport.recordPongReceived?.(peerId, message.timestamp);
+		const data = this.peerRttData.get(peerId);
+		if (!data) return;
+
+		const sentAt = data.pendingPings.get(message.timestamp);
+		if (sentAt === undefined) return;
+
+		// Calculate RTT
+		const rtt = Date.now() - sentAt;
+		data.pendingPings.delete(message.timestamp);
+
+		// Update running average
+		data.samples.push(rtt);
+		if (data.samples.length > Session.RTT_SAMPLE_COUNT) {
+			data.samples.shift();
 		}
+		data.rtt = data.samples.reduce((a, b) => a + b, 0) / data.samples.length;
 	}
 
 	/**
@@ -1521,11 +1541,23 @@ export class Session {
 		const timestamp = Date.now();
 		this.transport.send(peerId, encodeMessage(createPing(timestamp)), false);
 
-		// Record the ping for RTT calculation if transport supports metrics
-		const transport = this.transport as {
-			recordPingSent?: (peerId: string, timestamp: number) => void;
-		};
-		transport.recordPingSent?.(peerId, timestamp);
+		// Track the ping locally for RTT calculation
+		let data = this.peerRttData.get(peerId);
+		if (!data) {
+			data = { pendingPings: new Map(), rtt: 0, samples: [] };
+			this.peerRttData.set(peerId, data);
+		}
+		data.pendingPings.set(timestamp, timestamp);
+	}
+
+	/**
+	 * Get the measured RTT to a peer in milliseconds.
+	 * Returns 0 if no RTT data is available yet.
+	 *
+	 * @param peerId - The peer to get RTT for
+	 */
+	getRtt(peerId: string): number {
+		return this.peerRttData.get(peerId)?.rtt ?? 0;
 	}
 
 	/**
