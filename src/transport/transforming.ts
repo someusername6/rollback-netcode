@@ -109,7 +109,9 @@ export class TransformingTransport implements TransportAdapter {
 		null;
 	public onConnect: ((peerId: string) => void) | null = null;
 	public onDisconnect: ((peerId: string) => void) | null = null;
-	public onError: ((peerId: string | null, error: Error, context: string) => void) | null = null;
+	public onError:
+		| ((peerId: string | null, error: Error, context: string) => void)
+		| null = null;
 
 	private readonly inner: TransportAdapter;
 	private readonly config: TransformingTransportConfig;

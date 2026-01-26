@@ -228,7 +228,9 @@ export class WebRTCTransport implements TransportAdapter {
 	onMessage: ((peerId: string, message: Uint8Array) => void) | null = null;
 	onConnect: ((peerId: string) => void) | null = null;
 	onDisconnect: ((peerId: string) => void) | null = null;
-	onError: ((peerId: string | null, error: Error, context: string) => void) | null = null;
+	onError:
+		| ((peerId: string | null, error: Error, context: string) => void)
+		| null = null;
 
 	/**
 	 * Create a new WebRTC transport.
@@ -631,7 +633,8 @@ export class WebRTCTransport implements TransportAdapter {
 			);
 			// RTCErrorEvent has an error property, but the type might be just Event
 			const rtcEvent = event as RTCErrorEvent;
-			const error = rtcEvent.error ?? new Error(`DataChannel error (${channelType})`);
+			const error =
+				rtcEvent.error ?? new Error(`DataChannel error (${channelType})`);
 			this.onError?.(peerId, error, `dataChannel.${channelType}`);
 		};
 

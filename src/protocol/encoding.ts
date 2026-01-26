@@ -668,7 +668,12 @@ function decodeSyncMessage(
 	// Hash is unsigned (game.hash() returns h >>> 0)
 	const hash = view.getUint32(offset);
 	offset += 4;
-	const [state, stateLen] = readBytes(view, offset, msgType, limits.maxStateSize);
+	const [state, stateLen] = readBytes(
+		view,
+		offset,
+		msgType,
+		limits.maxStateSize,
+	);
 	offset += stateLen;
 
 	ensureBytes(view, offset, 2, msgType);
@@ -1107,7 +1112,12 @@ function decodeStateSyncMessage(
 	// Hash is unsigned (game.hash() returns h >>> 0)
 	const hash = view.getUint32(offset);
 	offset += 4;
-	const [state, stateLen] = readBytes(view, offset, msgType, limits.maxStateSize);
+	const [state, stateLen] = readBytes(
+		view,
+		offset,
+		msgType,
+		limits.maxStateSize,
+	);
 	offset += stateLen;
 
 	ensureBytes(view, offset, 2, msgType);

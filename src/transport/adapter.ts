@@ -87,7 +87,9 @@ export interface TransportAdapter {
 	 * @param error - The error that occurred
 	 * @param context - Additional context about where the error occurred
 	 */
-	onError?: ((peerId: string | null, error: Error, context: string) => void) | null;
+	onError?:
+		| ((peerId: string | null, error: Error, context: string) => void)
+		| null;
 
 	/**
 	 * Set of currently connected peer IDs.

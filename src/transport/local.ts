@@ -214,7 +214,9 @@ export class LocalTransport implements TransportAdapter {
 		null;
 	public onConnect: ((peerId: string) => void) | null = null;
 	public onDisconnect: ((peerId: string) => void) | null = null;
-	public onError: ((peerId: string | null, error: Error, context: string) => void) | null = null;
+	public onError:
+		| ((peerId: string | null, error: Error, context: string) => void)
+		| null = null;
 
 	/** Callback for keepalive ping - set by Session to send Ping messages */
 	public onKeepalivePing: ((peerId: string) => void) | null = null;
@@ -222,9 +224,13 @@ export class LocalTransport implements TransportAdapter {
 	private readonly _connectedPeers: Set<string> = new Set();
 	private readonly linkedTransports: Map<string, LocalTransport> = new Map();
 	private readonly pendingMessages: MessageHeap = new MessageHeap();
-	private readonly config: Required<LocalTransportConfig>;
+	private readonly packetLoss: number;
 	private readonly random: SeededRandom | null;
 	private currentTime = 0;
+	/** Simulated one-way latency in milliseconds */
+	private _latency: number = 0;
+	/** Simulated jitter (latency variation) in milliseconds */
+	private _jitter: number = 0;
 
 	/**
 	 * Create a new LocalTransport.
@@ -236,17 +242,13 @@ export class LocalTransport implements TransportAdapter {
 		public readonly localPeerId: string,
 		config?: LocalTransportConfig,
 	) {
-		this.config = {
-			latency: config?.latency ?? 0,
-			jitter: config?.jitter ?? 0,
-			packetLoss: config?.packetLoss ?? 0,
-			deterministic: config?.deterministic ?? false,
-			seed: config?.seed ?? 12345,
-		};
+		this.latency = config?.latency ?? 0;
+		this.jitter = config?.jitter ?? 0;
+		this.packetLoss = config?.packetLoss ?? 0;
 
-		this.random = this.config.deterministic
-			? new SeededRandom(this.config.seed)
-			: null;
+		const deterministic = config?.deterministic ?? false;
+		const seed = config?.seed ?? 12345;
+		this.random = deterministic ? new SeededRandom(seed) : null;
 	}
 
 	/**
@@ -447,11 +449,11 @@ export class LocalTransport implements TransportAdapter {
 	 * Calculate delay for a message based on latency and jitter.
 	 */
 	private calculateDelay(): number {
-		let delay = this.config.latency;
+		let delay = this._latency;
 
-		if (this.config.jitter > 0) {
-			const jitterAmount = this.getRandomValue() * this.config.jitter * 2;
-			delay += jitterAmount - this.config.jitter;
+		if (this._jitter > 0) {
+			const jitterAmount = this.getRandomValue() * this._jitter * 2;
+			delay += jitterAmount - this._jitter;
 		}
 
 		return Math.max(0, delay);
@@ -461,10 +463,10 @@ export class LocalTransport implements TransportAdapter {
 	 * Determine if a packet should be dropped.
 	 */
 	private shouldDropPacket(): boolean {
-		if (this.config.packetLoss <= 0) {
+		if (this.packetLoss <= 0) {
 			return false;
 		}
-		return this.getRandomValue() < this.config.packetLoss;
+		return this.getRandomValue() < this.packetLoss;
 	}
 
 	/**
@@ -475,6 +477,36 @@ export class LocalTransport implements TransportAdapter {
 			return this.random.next();
 		}
 		return Math.random();
+	}
+
+	/**
+	 * Get the current simulated latency in milliseconds.
+	 */
+	get latency(): number {
+		return this._latency;
+	}
+
+	/**
+	 * Set the simulated latency in milliseconds.
+	 * Can be changed at any time; affects only new messages.
+	 */
+	set latency(value: number) {
+		this._latency = Math.max(0, value);
+	}
+
+	/**
+	 * Get the current simulated jitter in milliseconds.
+	 */
+	get jitter(): number {
+		return this._jitter;
+	}
+
+	/**
+	 * Set the simulated jitter in milliseconds.
+	 * Can be changed at any time; affects only new messages.
+	 */
+	set jitter(value: number) {
+		this._jitter = Math.max(0, value);
 	}
 
 	/**

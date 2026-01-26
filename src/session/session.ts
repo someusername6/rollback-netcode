@@ -198,10 +198,7 @@ export class Session {
 		this.debug = createDebugLogger(this.config.debug);
 
 		// Warn about Mesh topology with many players
-		if (
-			this.config.topology === Topology.Mesh &&
-			this.config.maxPlayers > 4
-		) {
+		if (this.config.topology === Topology.Mesh && this.config.maxPlayers > 4) {
 			console.warn(
 				"[rollback-netcode] Mesh topology with >4 players is not recommended. " +
 					"Mesh requires N×(N-1)/2 connections which scales poorly. " +
@@ -262,7 +259,11 @@ export class Session {
 			onRollback: (restoreTick) => {
 				for (const playerId of this.emittedJoinEvents) {
 					const playerInfo = this.playerManager.getPlayer(playerId);
-					if (playerInfo && playerInfo.joinTick !== null && playerInfo.joinTick > restoreTick) {
+					if (
+						playerInfo &&
+						playerInfo.joinTick !== null &&
+						playerInfo.joinTick > restoreTick
+					) {
 						this.emittedJoinEvents.delete(playerId);
 					}
 				}
@@ -1663,7 +1664,12 @@ export class Session {
 					hostHash: desync.referenceHash,
 					playerHash: desync.playerHash,
 				});
-				this.emit("desync", desync.tick, desync.referenceHash, desync.playerHash);
+				this.emit(
+					"desync",
+					desync.tick,
+					desync.referenceHash,
+					desync.playerHash,
+				);
 			}
 
 			// Broadcast authoritative state to ALL players to prevent tick divergence

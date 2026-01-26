@@ -71,7 +71,11 @@ export class InputBuffer {
 				// Remove from old join tick index
 				this.removeFromTickIndex(this.joinsByTick, existing.joinTick, playerId);
 				// Remove from leave tick index
-				this.removeFromTickIndex(this.leavesByTick, existing.leaveTick, playerId);
+				this.removeFromTickIndex(
+					this.leavesByTick,
+					existing.leaveTick,
+					playerId,
+				);
 
 				existing.joinTick = joinTick;
 				existing.leaveTick = null;

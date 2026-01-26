@@ -625,7 +625,12 @@ function decodeSyncMessage(view, limits) {
   ensureBytes(view, offset, 4, msgType);
   const hash = view.getUint32(offset);
   offset += 4;
-  const [state, stateLen] = readBytes(view, offset, msgType, limits.maxStateSize);
+  const [state, stateLen] = readBytes(
+    view,
+    offset,
+    msgType,
+    limits.maxStateSize
+  );
   offset += stateLen;
   ensureBytes(view, offset, 2, msgType);
   const playerCount = view.getUint16(offset);
@@ -948,7 +953,12 @@ function decodeStateSyncMessage(view, limits) {
   ensureBytes(view, offset, 4, msgType);
   const hash = view.getUint32(offset);
   offset += 4;
-  const [state, stateLen] = readBytes(view, offset, msgType, limits.maxStateSize);
+  const [state, stateLen] = readBytes(
+    view,
+    offset,
+    msgType,
+    limits.maxStateSize
+  );
   offset += stateLen;
   ensureBytes(view, offset, 2, msgType);
   const playerCount = view.getUint16(offset);
@@ -1219,7 +1229,11 @@ var InputBuffer = class {
     if (existing) {
       if (existing.leaveTick !== null) {
         this.removeFromTickIndex(this.joinsByTick, existing.joinTick, playerId);
-        this.removeFromTickIndex(this.leavesByTick, existing.leaveTick, playerId);
+        this.removeFromTickIndex(
+          this.leavesByTick,
+          existing.leaveTick,
+          playerId
+        );
         existing.joinTick = joinTick;
         existing.leaveTick = null;
         existing.confirmedTick = asTick(joinTick - 1);
@@ -4189,7 +4203,12 @@ var Session = class _Session {
           hostHash: desync.referenceHash,
           playerHash: desync.playerHash
         });
-        this.emit("desync", desync.tick, desync.referenceHash, desync.playerHash);
+        this.emit(
+          "desync",
+          desync.tick,
+          desync.referenceHash,
+          desync.playerHash
+        );
       }
       const state = this.engine.getState();
       const syncMsg = createSync(
@@ -4350,14 +4369,12 @@ var LocalTransport = class {
    */
   constructor(localPeerId, config) {
     this.localPeerId = localPeerId;
-    this.config = {
-      latency: config?.latency ?? 0,
-      jitter: config?.jitter ?? 0,
-      packetLoss: config?.packetLoss ?? 0,
-      deterministic: config?.deterministic ?? false,
-      seed: config?.seed ?? 12345
-    };
-    this.random = this.config.deterministic ? new SeededRandom(this.config.seed) : null;
+    this.latency = config?.latency ?? 0;
+    this.jitter = config?.jitter ?? 0;
+    this.packetLoss = config?.packetLoss ?? 0;
+    const deterministic = config?.deterministic ?? false;
+    const seed = config?.seed ?? 12345;
+    this.random = deterministic ? new SeededRandom(seed) : null;
   }
   onMessage = null;
   onConnect = null;
@@ -4368,9 +4385,13 @@ var LocalTransport = class {
   _connectedPeers = /* @__PURE__ */ new Set();
   linkedTransports = /* @__PURE__ */ new Map();
   pendingMessages = new MessageHeap();
-  config;
+  packetLoss;
   random;
   currentTime = 0;
+  /** Simulated one-way latency in milliseconds */
+  _latency = 0;
+  /** Simulated jitter (latency variation) in milliseconds */
+  _jitter = 0;
   /**
    * Get the set of connected peer IDs.
    */
@@ -4537,10 +4558,10 @@ var LocalTransport = class {
    * Calculate delay for a message based on latency and jitter.
    */
   calculateDelay() {
-    let delay = this.config.latency;
-    if (this.config.jitter > 0) {
-      const jitterAmount = this.getRandomValue() * this.config.jitter * 2;
-      delay += jitterAmount - this.config.jitter;
+    let delay = this._latency;
+    if (this._jitter > 0) {
+      const jitterAmount = this.getRandomValue() * this._jitter * 2;
+      delay += jitterAmount - this._jitter;
     }
     return Math.max(0, delay);
   }
@@ -4548,10 +4569,10 @@ var LocalTransport = class {
    * Determine if a packet should be dropped.
    */
   shouldDropPacket() {
-    if (this.config.packetLoss <= 0) {
+    if (this.packetLoss <= 0) {
       return false;
     }
-    return this.getRandomValue() < this.config.packetLoss;
+    return this.getRandomValue() < this.packetLoss;
   }
   /**
    * Get a random value between 0 and 1.
@@ -4561,6 +4582,32 @@ var LocalTransport = class {
       return this.random.next();
     }
     return Math.random();
+  }
+  /**
+   * Get the current simulated latency in milliseconds.
+   */
+  get latency() {
+    return this._latency;
+  }
+  /**
+   * Set the simulated latency in milliseconds.
+   * Can be changed at any time; affects only new messages.
+   */
+  set latency(value) {
+    this._latency = Math.max(0, value);
+  }
+  /**
+   * Get the current simulated jitter in milliseconds.
+   */
+  get jitter() {
+    return this._jitter;
+  }
+  /**
+   * Set the simulated jitter in milliseconds.
+   * Can be changed at any time; affects only new messages.
+   */
+  set jitter(value) {
+    this._jitter = Math.max(0, value);
   }
   /**
    * Trigger keepalive pings for all connected peers.
@@ -9019,7 +9066,7 @@ var DemoManager = class {
     });
     latencySelect.addEventListener("change", () => {
       this.simulatedLatency = parseInt(latencySelect.value, 10);
-      this.reset();
+      this.updateTransportLatency();
     });
     this.addPlayerBtn.addEventListener("click", () => {
       this.addPlayer();
@@ -9059,6 +9106,17 @@ var DemoManager = class {
     this.activePlayerId = null;
     this.playerCounter = 0;
     this.updateAddPlayerButton();
+  }
+  /**
+   * Update the latency settings on all existing transports.
+   * Called when the latency dropdown changes.
+   */
+  updateTransportLatency() {
+    const jitter = Math.floor(this.simulatedLatency * JITTER_RATIO);
+    for (const entry of this.players.values()) {
+      entry.transport.latency = this.simulatedLatency;
+      entry.transport.jitter = jitter;
+    }
   }
   /**
    * Get the current input as a byte based on pressed keys.

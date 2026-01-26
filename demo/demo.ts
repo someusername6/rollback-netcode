@@ -142,7 +142,7 @@ class DemoManager {
 
     latencySelect.addEventListener("change", () => {
       this.simulatedLatency = parseInt(latencySelect.value, 10);
-      this.reset();
+      this.updateTransportLatency();
     });
 
     this.addPlayerBtn.addEventListener("click", () => {
@@ -188,6 +188,18 @@ class DemoManager {
     this.activePlayerId = null;
     this.playerCounter = 0;
     this.updateAddPlayerButton();
+  }
+
+  /**
+   * Update the latency settings on all existing transports.
+   * Called when the latency dropdown changes.
+   */
+  private updateTransportLatency(): void {
+    const jitter = Math.floor(this.simulatedLatency * JITTER_RATIO);
+    for (const entry of this.players.values()) {
+      entry.transport.latency = this.simulatedLatency;
+      entry.transport.jitter = jitter;
+    }
   }
 
   /**
