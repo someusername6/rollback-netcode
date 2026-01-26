@@ -1,5 +1,7 @@
 # Rollback Netcode
 
+> **Note:** This library is under active development. APIs may change.
+
 A TypeScript library for P2P rollback netcode in browser-based multiplayer games. Supports 4+ players with WebRTC—no dedicated server required.
 
 **[Live Demo](https://someusername6.github.io/rollback-netcode)** - Try the library without installing anything
