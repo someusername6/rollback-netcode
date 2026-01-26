@@ -615,8 +615,15 @@ class DemoManager {
     // Trigger keepalive pings periodically for RTT measurement
     const shouldPing = this.tickCounter % KEEPALIVE_INTERVAL_TICKS === 0;
 
+    // Send pings BEFORE session ticks so round-trip can complete in same frame
+    if (shouldPing) {
+      this.sendPingsToHost();
+    }
+
     if (this.simulatedLatency === 0) {
       // Zero-latency mode: interleave flushes for instant delivery
+      // Host ticks first (first in Map), processes pings, sends pongs
+      // Flush after host delivers pongs to clients before they tick
       this.flushAllTransportsOnce();
 
       for (const entry of this.players.values()) {
@@ -625,22 +632,11 @@ class DemoManager {
         this.trackRollback(entry, result);
         this.flushAllTransportsOnce();
       }
-
-      // Send pings for RTT measurement (RTT will be ~0 in zero-latency mode)
-      if (shouldPing) {
-        this.sendPingsToHost();
-        this.flushAllTransportsOnce();
-      }
     } else {
       // Simulated latency mode: use time-based delivery
       // Advance transport time and deliver due messages
       for (const entry of this.players.values()) {
         entry.transport.tick(TICK_MS);
-      }
-
-      // Send pings for RTT measurement
-      if (shouldPing) {
-        this.sendPingsToHost();
       }
 
       // Tick all sessions

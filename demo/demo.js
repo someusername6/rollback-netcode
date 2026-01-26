@@ -9428,6 +9428,9 @@ var DemoManager = class {
     const input = this.getInput();
     this.tickCounter++;
     const shouldPing = this.tickCounter % KEEPALIVE_INTERVAL_TICKS === 0;
+    if (shouldPing) {
+      this.sendPingsToHost();
+    }
     if (this.simulatedLatency === 0) {
       this.flushAllTransportsOnce();
       for (const entry of this.players.values()) {
@@ -9436,16 +9439,9 @@ var DemoManager = class {
         this.trackRollback(entry, result);
         this.flushAllTransportsOnce();
       }
-      if (shouldPing) {
-        this.sendPingsToHost();
-        this.flushAllTransportsOnce();
-      }
     } else {
       for (const entry of this.players.values()) {
         entry.transport.tick(TICK_MS);
-      }
-      if (shouldPing) {
-        this.sendPingsToHost();
       }
       for (const entry of this.players.values()) {
         const playerInput = entry.id === this.activePlayerId ? input : new Uint8Array([0]);
