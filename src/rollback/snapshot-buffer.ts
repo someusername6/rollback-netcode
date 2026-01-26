@@ -99,8 +99,7 @@ export class SnapshotBuffer {
 		// Warn on invariant violation: new ticks must be >= newest for binary search
 		if (this._newestTick !== undefined && tick < this._newestTick) {
 			console.error(
-				`SnapshotBuffer: tick ${tick} is out of order (newest: ${this._newestTick}). ` +
-					`This will corrupt binary search in getAtOrBefore().`,
+				`SnapshotBuffer: tick ${tick} is out of order (newest: ${this._newestTick}). This will corrupt binary search in getAtOrBefore().`,
 			);
 		}
 

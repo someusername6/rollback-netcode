@@ -228,9 +228,9 @@ export class LocalTransport implements TransportAdapter {
 	private readonly random: SeededRandom | null;
 	private currentTime = 0;
 	/** Simulated one-way latency in milliseconds */
-	private _latency: number = 0;
+	private _latency = 0;
 	/** Simulated jitter (latency variation) in milliseconds */
-	private _jitter: number = 0;
+	private _jitter = 0;
 
 	/**
 	 * Create a new LocalTransport.
