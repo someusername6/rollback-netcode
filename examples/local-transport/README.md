@@ -8,7 +8,7 @@ See [examples/README.md](../README.md) for quick start instructions.
 
 ## Features
 
-- Add/remove players dynamically (up to 4)
+- Add/remove players dynamically (up to 16)
 - Switch between Star and Mesh topologies
 - Adjust simulated latency and jitter in real-time
 - Induce desyncs to observe detection and recovery
