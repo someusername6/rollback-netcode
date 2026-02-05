@@ -1,23 +1,27 @@
 {
   "name": "rollback-netcode",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "P2P rollback netcode library for browser-based multiplayer games",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "sideEffects": false,
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": null
+      "import": "./dist/index.js"
     }
   },
   "files": [
-    "dist"
+    "dist/**/*.js",
+    "dist/**/*.d.ts"
   ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/someusername6/rollback-netcode.git"
+  },
+  "bugs": {
+    "url": "https://github.com/someusername6/rollback-netcode/issues"
   },
   "homepage": "https://someusername6.github.io/rollback-netcode",
   "scripts": {
@@ -54,8 +58,13 @@
   "engines": {
     "node": ">=22.0.0"
   },
-  "dependencies": {
+  "peerDependencies": {
     "pako": "^2.1.0"
+  },
+  "peerDependenciesMeta": {
+    "pako": {
+      "optional": true
+    }
   },
   "packageManager": "npm@11.4.1+sha512.fcee43884166b6f9c5d04535fb95650e9708b6948a1f797eddf40e9778646778a518dfa32651b1c62ff36f4ac42becf177ca46ca27d53f24b539190c8d91802b"
 }

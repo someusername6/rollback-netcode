@@ -460,6 +460,14 @@ export class WebRTCTransport implements TransportAdapter {
 	}
 
 	/**
+	 * Alias for destroy(). Implements the optional dispose() from TransportAdapter
+	 * so that TransformingTransport can clean up the inner transport.
+	 */
+	dispose(): void {
+		this.destroy();
+	}
+
+	/**
 	 * Send a message to a peer.
 	 *
 	 * @param peerId - The peer's ID

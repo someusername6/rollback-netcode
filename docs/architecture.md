@@ -440,14 +440,20 @@ The library does NOT include a signaling server. Users must provide a way to exc
 The `WebRTCTransport` accepts signaling callbacks:
 
 ```typescript
-const transport = new WebRTCTransport(localPeerId, {
-  onSignal: async (peerId, signal) => {
+const transport = new WebRTCTransport(localPeerId);
+
+transport.setSignalingCallbacks({
+  onSignal: (peerId, signal) => {
     // Send to peer via your signaling mechanism
   }
 });
 
 // Handle incoming signals
-transport.handleSignal(fromPeerId, signalData);
+if (signalData.type === 'description') {
+  transport.handleRemoteDescription(fromPeerId, signalData.description);
+} else {
+  transport.handleRemoteCandidate(fromPeerId, signalData.candidate);
+}
 ```
 
 ### DataChannel Configuration
@@ -467,12 +473,11 @@ const reliableConfig = {
 
 ### NAT Traversal
 
-Configure STUN/TURN servers via `rtcConfig`:
+Configure STUN/TURN servers via `rtcConfiguration`:
 
 ```typescript
 const transport = new WebRTCTransport(localPeerId, {
-  onSignal,
-  rtcConfig: {
+  rtcConfiguration: {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'turn:your-turn-server.com', username: '...', credential: '...' }
@@ -488,29 +493,39 @@ const transport = new WebRTCTransport(localPeerId, {
 In-memory transport for deterministic testing:
 
 ```typescript
-const [t1, t2] = createLocalTransportGroup(['player-1', 'player-2'], {
+const transports = createLocalTransportGroup(['player-1', 'player-2'], {
   latency: 50,        // Simulated one-way latency (ms)
   jitter: 10,         // Random variation (ms)
   packetLoss: 0.01    // 1% packet loss
 });
+const t1 = transports.get('player-1')!;
+const t2 = transports.get('player-2')!;
 ```
 
-### Test Utilities
+### Test Pattern
 
 ```typescript
-import { TestGame, createTestSession, flushAllTransports } from 'rollback-netcode';
+import { createSession, createLocalTransportGroup } from 'rollback-netcode';
 
-// Create test sessions with linked transports
-const host = createTestSession({ transport: t1 });
-const client = createTestSession({ transport: t2 });
+// Create linked transports
+const transports = createLocalTransportGroup(['host', 'client'], { latency: 50 });
+const t1 = transports.get('host')!;
+const t2 = transports.get('client')!;
+
+// Create sessions with your game
+const hostGame = new MyGame();
+const clientGame = new MyGame();
+const hostSession = createSession({ game: hostGame, transport: t1 });
+const clientSession = createSession({ game: clientGame, transport: t2 });
 
 // Simulate ticks
-host.session.tick(input);
-client.session.tick(input);
-flushAllTransports([t1, t2]);
+hostSession.tick(input);
+clientSession.tick(input);
+t1.tick(16);
+t2.tick(16);
 
 // Verify state matches
-assert(host.game.hash() === client.game.hash());
+assert(hostGame.hash() === clientGame.hash());
 ```
 
 ### Determinism Verification

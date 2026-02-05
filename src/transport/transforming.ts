@@ -5,8 +5,28 @@
  * messages that exceed WebRTC DataChannel limits (~16KB).
  */
 
-import * as pako from "pako";
 import type { ConnectionMetrics, TransportAdapter } from "./adapter.js";
+
+/**
+ * Lazily-loaded pako module. Resolved on first TransformingTransport
+ * construction that requires compression. Kept at module scope so the
+ * dynamic import runs at most once.
+ */
+let pako: typeof import("pako") | undefined;
+let pakoLoadPromise: Promise<void> | undefined;
+
+function ensurePakoLoading(): Promise<void> {
+	if (!pakoLoadPromise) {
+		pakoLoadPromise = import("pako")
+			.then((mod) => {
+				pako = mod;
+			})
+			.catch(() => {
+				// pako not installed — compression unavailable
+			});
+	}
+	return pakoLoadPromise;
+}
 
 /**
  * Configuration for TransformingTransport.
@@ -127,6 +147,13 @@ export class TransformingTransport implements TransportAdapter {
 	private cleanupTimerId: ReturnType<typeof setInterval> | null = null;
 
 	/**
+	 * Promise that resolves once the transport is fully initialized
+	 * (pako loaded if compression is enabled). Await this before sending
+	 * if you need to send immediately after construction.
+	 */
+	public readonly ready: Promise<void>;
+
+	/**
 	 * Create a new TransformingTransport.
 	 *
 	 * @param inner - The underlying transport to wrap
@@ -141,6 +168,16 @@ export class TransformingTransport implements TransportAdapter {
 			...DEFAULT_TRANSFORMING_TRANSPORT_CONFIG,
 			...config,
 		};
+
+		// Kick off lazy pako load if compression is needed.
+		// The ready promise always resolves (never rejects) so that consumers
+		// who don't await it won't get an unhandled rejection. If pako fails
+		// to load, the error surfaces synchronously at send() time instead.
+		if (this.config.compression !== "never" && !pako) {
+			this.ready = ensurePakoLoading();
+		} else {
+			this.ready = Promise.resolve();
+		}
 
 		// Wire up inner transport callbacks
 		this.inner.onMessage = (peerId, message) => {
@@ -157,11 +194,9 @@ export class TransformingTransport implements TransportAdapter {
 		};
 
 		// Forward errors from inner transport
-		if (this.inner.onError !== undefined) {
-			this.inner.onError = (peerId, error, context) => {
-				this.onError?.(peerId, error, context);
-			};
-		}
+		this.inner.onError = (peerId, error, context) => {
+			this.onError?.(peerId, error, context);
+		};
 
 		// Start periodic cleanup for timed-out reassembly buffers
 		this.startCleanupTimer();
@@ -270,7 +305,13 @@ export class TransformingTransport implements TransportAdapter {
 			return this.addCompressionHeader(message, false);
 		}
 
-		// Attempt compression
+		if (!pako) {
+			throw new Error(
+				'TransformingTransport requires the "pako" package for compression. ' +
+					"Install it with: npm install pako\n" +
+					'Or set compression: "never" to disable compression.',
+			);
+		}
 		const compressed = pako.deflate(message);
 
 		// In auto mode, only use compression if it actually reduces size
@@ -510,6 +551,10 @@ export class TransformingTransport implements TransportAdapter {
 
 		if (compressionByte === COMPRESSION_HEADER_GZIP) {
 			try {
+				if (!pako) {
+					// Compressed message received but pako not available — drop it
+					return;
+				}
 				decompressed = pako.inflate(payload);
 			} catch {
 				// Decompression failed, ignore message

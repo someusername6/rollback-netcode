@@ -70,15 +70,22 @@ class MyGame implements Game {
 ```typescript
 import { createSession, WebRTCTransport } from 'rollback-netcode';
 
-const transport = new WebRTCTransport('my-player-id', {
-  onSignal: async (peerId, signal) => {
+const transport = new WebRTCTransport('my-player-id');
+
+transport.setSignalingCallbacks({
+  onSignal: (peerId, signal) => {
     // Send signal to peer via your signaling server
-    await signalingServer.send(peerId, signal);
+    signalingServer.send(peerId, signal);
   }
 });
 
+// Handle incoming signals from your signaling server
 signalingServer.onSignal((fromPeerId, signal) => {
-  transport.handleSignal(fromPeerId, signal);
+  if (signal.type === 'description') {
+    transport.handleRemoteDescription(fromPeerId, signal.description);
+  } else {
+    transport.handleRemoteCandidate(fromPeerId, signal.candidate);
+  }
 });
 
 const session = createSession({ game: new MyGame(), transport });

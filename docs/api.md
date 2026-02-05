@@ -28,7 +28,7 @@ const session = createSession({
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `state` | `'disconnected' \| 'lobby' \| 'playing' \| 'paused'` | Current session state |
+| `state` | `SessionState` | Current session state (enum: Disconnected, Connecting, Lobby, Playing, Paused) |
 | `isHost` | `boolean` | Whether local player is the host |
 | `localPlayerId` | `PlayerId` | Local player's ID |
 | `players` | `Map<PlayerId, PlayerInfo>` | Connected players |
@@ -61,7 +61,7 @@ const session = createSession({
     hashInterval: 60,           // Ticks between hash checks (default: 60)
     disconnectTimeout: 5000,    // Ms before disconnecting idle peer (default: 5000)
     topology: Topology.Star,    // Star (through host) or Mesh (direct)
-    desyncAuthority: DesyncAuthority.Host,  // Who detects desyncs
+    desyncAuthority: DesyncAuthority.Peer,  // Who detects desyncs (default)
   }
 });
 ```
@@ -76,18 +76,25 @@ For production use with real network connections.
 import { WebRTCTransport } from 'rollback-netcode';
 
 const transport = new WebRTCTransport(localPeerId, {
-  onSignal: async (peerId, signal) => {
-    // Send signal to peer via your signaling server
-    await signalingServer.send(peerId, signal);
-  },
-  rtcConfig: {
+  rtcConfiguration: {
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+  }
+});
+
+transport.setSignalingCallbacks({
+  onSignal: (peerId, signal) => {
+    // Send signal to peer via your signaling server
+    signalingServer.send(peerId, signal);
   }
 });
 
 // Handle incoming signals from your signaling server
 signalingServer.onSignal((fromPeerId, signal) => {
-  transport.handleSignal(fromPeerId, signal);
+  if (signal.type === 'description') {
+    transport.handleRemoteDescription(fromPeerId, signal.description);
+  } else {
+    transport.handleRemoteCandidate(fromPeerId, signal.candidate);
+  }
 });
 
 // Initiate connection to a peer
@@ -122,16 +129,25 @@ t3.tick(16);
 
 Wraps another transport to add compression and message segmentation. Use this for games with large state (>16KB).
 
+Compression requires the `pako` package (optional peer dependency):
+
+```bash
+npm install pako
+```
+
 ```typescript
 import { WebRTCTransport, TransformingTransport } from 'rollback-netcode';
 
-const webrtc = new WebRTCTransport('my-player-id', { onSignal });
+const webrtc = new WebRTCTransport('my-player-id');
 
 const transport = new TransformingTransport(webrtc, {
   compression: 'auto',        // 'auto' | 'always' | 'never'
   compressionThreshold: 128,  // Only compress messages > 128 bytes
   maxSegmentSize: 16000,      // Split messages larger than this
 });
+
+// Wait for compression module to load before sending
+await transport.ready;
 
 const session = createSession({ game, transport });
 ```

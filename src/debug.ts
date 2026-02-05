@@ -62,8 +62,4 @@ export function createDebugLogger(enabled: boolean): DebugLogger {
 /**
  * A no-op logger for when debugging is disabled.
  */
-export const noopLogger: DebugLogger = {
-	log: () => {},
-	warn: () => {},
-	trace: () => {},
-};
+export const noopLogger: DebugLogger = createDebugLogger(false);

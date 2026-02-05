@@ -25,17 +25,23 @@ See [examples/README.md](../README.md) for quick start instructions.
 ### Key Integration Points
 
 ```typescript
-// Create WebRTC transport with signaling callback
-const transport = new WebRTCTransport(peerId, {
+// Create WebRTC transport
+const transport = new WebRTCTransport(peerId);
+
+// Set signaling callback
+transport.setSignalingCallbacks({
   onSignal: (targetPeerId, signal) => {
-    // Send signal to peer via your signaling server
     signalingClient.sendSignal(targetPeerId, signal);
   },
 });
 
 // Handle incoming signals from signaling server
 signalingClient.onSignal = (fromPeerId, signal) => {
-  transport.handleSignal(fromPeerId, signal);
+  if (signal.type === 'description') {
+    transport.handleRemoteDescription(fromPeerId, signal.description);
+  } else {
+    transport.handleRemoteCandidate(fromPeerId, signal.candidate);
+  }
 };
 
 // Initiate connection to a peer (call after signaling is ready)

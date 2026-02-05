@@ -14,9 +14,11 @@
 import {
   createSession,
   WebRTCTransport,
+  SessionState,
   type Session,
   type Game,
   type PlayerId,
+  type SignalMessage,
 } from "../../dist/index.js";
 
 // =============================================================================
@@ -42,8 +44,8 @@ class DotGame implements Game {
     if (this.players.has(playerId)) return;
     const colorIndex = this.players.size % PLAYER_COLORS.length;
     this.players.set(playerId, {
-      x: 50 + Math.random() * (CANVAS_WIDTH - 100),
-      y: 50 + Math.random() * (CANVAS_HEIGHT - 100),
+      x: CANVAS_WIDTH / 2,
+      y: CANVAS_HEIGHT / 2,
       color: PLAYER_COLORS[colorIndex]!,
     });
     this.playerOrder.push(playerId);
@@ -245,7 +247,9 @@ class WebRTCDemo {
 
   private async initTransportAndSession() {
     // Create WebRTC transport
-    this.transport = new WebRTCTransport(this.peerId, {
+    this.transport = new WebRTCTransport(this.peerId);
+
+    this.transport.setSignalingCallbacks({
       onSignal: (targetPeerId, signal) => {
         this.signaling.sendSignal(targetPeerId, signal);
       },
@@ -253,7 +257,12 @@ class WebRTCDemo {
 
     // Handle signals from signaling server
     this.signaling.onSignal = (fromPeerId, signal) => {
-      this.transport!.handleSignal(fromPeerId, signal as RTCSessionDescriptionInit | RTCIceCandidateInit);
+      const msg = signal as SignalMessage;
+      if (msg.type === "description") {
+        this.transport!.handleRemoteDescription(fromPeerId, msg.description);
+      } else {
+        this.transport!.handleRemoteCandidate(fromPeerId, msg.candidate);
+      }
     };
 
     // Create session
@@ -312,7 +321,7 @@ class WebRTCDemo {
       this.session!.on("playerJoined", () => {
         if (!this.running && this.session!.players.size >= 2) {
           setTimeout(() => {
-            if (this.session!.state === "lobby") {
+            if (this.session!.state === SessionState.Lobby) {
               this.session!.start();
             }
           }, 500);

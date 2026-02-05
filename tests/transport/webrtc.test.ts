@@ -108,50 +108,54 @@ describe("WebRTCTransport", () => {
 	describe("RTT metrics", () => {
 		it("should calculate RTT from ping/pong", () => {
 			const transport = new WebRTCTransport("local", { keepaliveInterval: 0 });
-			const peerId = "peer1";
-
-			// Simulate ping sent
-			const timestamp = 1000;
-			transport.recordPingSent(peerId, timestamp);
-
-			// Simulate 50ms delay, then pong received
 			const originalNow = Date.now;
-			let mockTime = originalNow();
-			Date.now = () => mockTime;
+			try {
+				const peerId = "peer1";
 
-			mockTime += 50; // 50ms later
-			transport.recordPongReceived(peerId, timestamp);
+				// Simulate ping sent
+				const timestamp = 1000;
+				transport.recordPingSent(peerId, timestamp);
 
-			const metrics = transport.getConnectionMetrics(peerId);
-			assert.ok(metrics);
-			assert.ok(metrics.rtt >= 0, `RTT should be non-negative, got ${metrics.rtt}`);
+				// Simulate 50ms delay, then pong received
+				let mockTime = originalNow();
+				Date.now = () => mockTime;
 
-			Date.now = originalNow;
-			transport.destroy();
+				mockTime += 50; // 50ms later
+				transport.recordPongReceived(peerId, timestamp);
+
+				const metrics = transport.getConnectionMetrics(peerId);
+				assert.ok(metrics);
+				assert.ok(metrics.rtt >= 0, `RTT should be non-negative, got ${metrics.rtt}`);
+			} finally {
+				Date.now = originalNow;
+				transport.destroy();
+			}
 		});
 
 		it("should handle negative RTT gracefully", () => {
 			const transport = new WebRTCTransport("local", { keepaliveInterval: 0 });
-			const peerId = "peer1";
-
-			// Record ping
-			const timestamp = 1000;
-			transport.recordPingSent(peerId, timestamp);
-
-			// Simulate clock going backwards (negative RTT scenario)
 			const originalNow = Date.now;
-			const sentTime = originalNow();
-			Date.now = () => sentTime - 100; // Clock went backwards by 100ms
+			try {
+				const peerId = "peer1";
 
-			transport.recordPongReceived(peerId, timestamp);
+				// Record ping
+				const timestamp = 1000;
+				transport.recordPingSent(peerId, timestamp);
 
-			const metrics = transport.getConnectionMetrics(peerId);
-			assert.ok(metrics);
-			// RTT should be clamped to 0 when clock skew causes negative value
-			assert.strictEqual(metrics.rtt, 0, "RTT should be clamped to 0");
+				// Simulate clock going backwards (negative RTT scenario)
+				const sentTime = originalNow();
+				Date.now = () => sentTime - 100; // Clock went backwards by 100ms
 
-			Date.now = originalNow;
-			transport.destroy();
+				transport.recordPongReceived(peerId, timestamp);
+
+				const metrics = transport.getConnectionMetrics(peerId);
+				assert.ok(metrics);
+				// RTT should be clamped to 0 when clock skew causes negative value
+				assert.strictEqual(metrics.rtt, 0, "RTT should be clamped to 0");
+			} finally {
+				Date.now = originalNow;
+				transport.destroy();
+			}
 		});
 
 		it("should clean up pending pings on disconnect", async () => {

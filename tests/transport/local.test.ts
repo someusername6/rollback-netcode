@@ -4,7 +4,7 @@ import { LocalTransport, createLocalTransportGroup } from "../../src/transport/l
 
 describe("LocalTransport", () => {
 	describe("basic messaging", () => {
-		it("should send and receive messages between linked transports", () => {
+		it("should send and receive messages between linked transports", async () => {
 			const t1 = new LocalTransport("peer-1");
 			const t2 = new LocalTransport("peer-2");
 			LocalTransport.link(t1, t2);
@@ -15,14 +15,13 @@ describe("LocalTransport", () => {
 			};
 
 			// Connect and send
-			t1.connect("peer-2").then(() => {
-				t1.send("peer-2", new Uint8Array([1, 2, 3]), true);
-				t1.flush();
+			await t1.connect("peer-2");
+			t1.send("peer-2", new Uint8Array([1, 2, 3]), true);
+			t1.flush();
 
-				assert.strictEqual(received.length, 1);
-				assert.strictEqual(received[0]?.peerId, "peer-1");
-				assert.deepStrictEqual(received[0]?.message, new Uint8Array([1, 2, 3]));
-			});
+			assert.strictEqual(received.length, 1);
+			assert.strictEqual(received[0]?.peerId, "peer-1");
+			assert.deepStrictEqual(received[0]?.message, new Uint8Array([1, 2, 3]));
 		});
 
 		it("should require linking before connecting", async () => {

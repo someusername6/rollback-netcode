@@ -131,18 +131,22 @@ Each input message includes the last N inputs for reliability on lossy connectio
 
 ## TransformingTransport
 
-For games with large state (>16KB), use `TransformingTransport` to add compression and message segmentation:
+For games with large state (>16KB), use `TransformingTransport` to add compression and message segmentation.
+
+Compression requires the `pako` package (optional peer dependency): `npm install pako`. Set `compression: 'never'` to use segmentation without pako.
 
 ```typescript
 import { TransformingTransport, WebRTCTransport } from 'rollback-netcode';
 
-const webrtc = new WebRTCTransport(localPeerId, { onSignal });
+const webrtc = new WebRTCTransport(localPeerId);
 const transport = new TransformingTransport(webrtc, {
   compression: 'auto',        // 'auto' | 'always' | 'never'
   compressionThreshold: 128,  // Only compress messages > 128 bytes
   maxSegmentSize: 16000,      // WebRTC DataChannel limit
   reassemblyTimeout: 5000,    // Timeout for incomplete messages
 });
+
+await transport.ready;  // Wait for compression module to load
 ```
 
 **When to use:**
@@ -244,10 +248,6 @@ const session = createSession({
 Listen for events to monitor performance:
 
 ```typescript
-session.on('rollback', (fromTick, toTick) => {
-  console.log(`Rolled back ${fromTick - toTick} ticks`);
-});
-
 session.on('desync', (tick, localHash, remoteHash) => {
   console.warn(`Desync at tick ${tick}`);
 });
@@ -302,10 +302,12 @@ import { TransformingTransport, WebRTCTransport } from 'rollback-netcode';
 
 // Wrap transport with compression for large states
 const transport = new TransformingTransport(
-  new WebRTCTransport(peerId, { onSignal }),
+  new WebRTCTransport(peerId),
   {
     compression: 'auto',
     maxSegmentSize: 14000,  // Leave headroom for WebRTC overhead
   }
 );
+
+await transport.ready;
 ```

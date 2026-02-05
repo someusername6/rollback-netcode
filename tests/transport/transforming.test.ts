@@ -9,7 +9,7 @@ import {
 /**
  * Helper to create a linked pair of transports with TransformingTransport wrapper.
  */
-function createTransformingPair(
+async function createTransformingPair(
 	configOverrides?: Partial<typeof DEFAULT_TRANSFORMING_TRANSPORT_CONFIG>,
 ) {
 	const local1 = new LocalTransport("peer-1");
@@ -18,6 +18,8 @@ function createTransformingPair(
 
 	const t1 = new TransformingTransport(local1, configOverrides);
 	const t2 = new TransformingTransport(local2, configOverrides);
+
+	await Promise.all([t1.ready, t2.ready]);
 
 	return { t1, t2, local1, local2 };
 }
@@ -51,7 +53,7 @@ function generateIncompressibleData(size: number): Uint8Array {
 describe("TransformingTransport", () => {
 	describe("pass-through mode", () => {
 		it("should pass messages through when both compression and segmentation are disabled", async () => {
-			const { t1, t2, local1 } = createTransformingPair({
+			const { t1, t2, local1 } = await createTransformingPair({
 				compression: "never",
 				segmentation: false,
 			});
@@ -75,7 +77,7 @@ describe("TransformingTransport", () => {
 		});
 
 		it("should forward connection events", async () => {
-			const { t1, t2 } = createTransformingPair();
+			const { t1, t2 } = await createTransformingPair();
 
 			const connects1: string[] = [];
 			const connects2: string[] = [];
@@ -93,7 +95,7 @@ describe("TransformingTransport", () => {
 		});
 
 		it("should forward disconnection events", async () => {
-			const { t1, t2 } = createTransformingPair();
+			const { t1, t2 } = await createTransformingPair();
 
 			const disconnects1: string[] = [];
 			const disconnects2: string[] = [];
@@ -114,7 +116,7 @@ describe("TransformingTransport", () => {
 
 	describe("compression", () => {
 		it("should not compress when compression is 'never'", async () => {
-			const { t1, t2, local1 } = createTransformingPair({
+			const { t1, t2, local1 } = await createTransformingPair({
 				compression: "never",
 				segmentation: false,
 			});
@@ -135,7 +137,7 @@ describe("TransformingTransport", () => {
 		});
 
 		it("should always compress when compression is 'always'", async () => {
-			const { t1, t2, local1 } = createTransformingPair({
+			const { t1, t2, local1 } = await createTransformingPair({
 				compression: "always",
 				segmentation: false,
 			});
@@ -156,7 +158,7 @@ describe("TransformingTransport", () => {
 		});
 
 		it("should only compress when beneficial in 'auto' mode", async () => {
-			const { t1, t2, local1 } = createTransformingPair({
+			const { t1, t2, local1 } = await createTransformingPair({
 				compression: "auto",
 				compressionThreshold: 0, // Try compression on all messages
 				segmentation: false,
@@ -180,7 +182,7 @@ describe("TransformingTransport", () => {
 		});
 
 		it("should skip compression in 'auto' mode when result is larger", async () => {
-			const { t1, t2, local1 } = createTransformingPair({
+			const { t1, t2, local1 } = await createTransformingPair({
 				compression: "auto",
 				compressionThreshold: 0,
 				segmentation: false,
@@ -204,7 +206,7 @@ describe("TransformingTransport", () => {
 		});
 
 		it("should respect compression threshold", async () => {
-			const { t1, t2, local1 } = createTransformingPair({
+			const { t1, t2, local1 } = await createTransformingPair({
 				compression: "auto",
 				compressionThreshold: 500,
 				segmentation: false,
@@ -230,7 +232,7 @@ describe("TransformingTransport", () => {
 
 	describe("segmentation", () => {
 		it("should send small messages as single segment", async () => {
-			const { t1, t2, local1 } = createTransformingPair({
+			const { t1, t2, local1 } = await createTransformingPair({
 				compression: "never",
 				segmentation: true,
 				maxSegmentSize: 1000,
@@ -253,7 +255,7 @@ describe("TransformingTransport", () => {
 
 		it("should segment large messages", async () => {
 			const maxSegmentSize = 100;
-			const { t1, t2, local1 } = createTransformingPair({
+			const { t1, t2, local1 } = await createTransformingPair({
 				compression: "never",
 				segmentation: true,
 				maxSegmentSize,
@@ -392,7 +394,7 @@ describe("TransformingTransport", () => {
 
 	describe("combined compression and segmentation", () => {
 		it("should compress then segment large messages", async () => {
-			const { t1, t2, local1 } = createTransformingPair({
+			const { t1, t2, local1 } = await createTransformingPair({
 				compression: "always",
 				segmentation: true,
 				maxSegmentSize: 100,
@@ -416,7 +418,7 @@ describe("TransformingTransport", () => {
 		});
 
 		it("should handle full round-trip with all transforms", async () => {
-			const { t1, t2, local1, local2 } = createTransformingPair({
+			const { t1, t2, local1, local2 } = await createTransformingPair({
 				compression: "auto",
 				compressionThreshold: 50,
 				segmentation: true,
@@ -453,7 +455,7 @@ describe("TransformingTransport", () => {
 
 	describe("timeout and cleanup", () => {
 		it("should clean up state on peer disconnect", async () => {
-			const { t1, t2 } = createTransformingPair();
+			const { t1, t2 } = await createTransformingPair();
 
 			await t1.connect("peer-2");
 			t1.disconnect("peer-2");
@@ -465,7 +467,7 @@ describe("TransformingTransport", () => {
 		});
 
 		it("should clean up state on dispose", async () => {
-			const { t1, t2 } = createTransformingPair();
+			const { t1, t2 } = await createTransformingPair();
 
 			await t1.connect("peer-2");
 			t1.dispose();
@@ -475,7 +477,7 @@ describe("TransformingTransport", () => {
 		});
 
 		it("should clean up state on disconnectAll", async () => {
-			const { t1, t2 } = createTransformingPair();
+			const { t1, t2 } = await createTransformingPair();
 
 			await t1.connect("peer-2");
 			t1.disconnectAll();
@@ -487,7 +489,7 @@ describe("TransformingTransport", () => {
 
 	describe("edge cases", () => {
 		it("should handle empty message", async () => {
-			const { t1, t2, local1 } = createTransformingPair({
+			const { t1, t2, local1 } = await createTransformingPair({
 				compression: "never",
 				segmentation: false,
 			});
@@ -507,7 +509,7 @@ describe("TransformingTransport", () => {
 		});
 
 		it("should handle single byte message", async () => {
-			const { t1, t2, local1 } = createTransformingPair({
+			const { t1, t2, local1 } = await createTransformingPair({
 				compression: "auto",
 				segmentation: true,
 			});
@@ -528,7 +530,7 @@ describe("TransformingTransport", () => {
 
 		it("should handle message at exact compression threshold", async () => {
 			const threshold = 128;
-			const { t1, t2, local1 } = createTransformingPair({
+			const { t1, t2, local1 } = await createTransformingPair({
 				compression: "auto",
 				compressionThreshold: threshold,
 				segmentation: false,
@@ -556,7 +558,7 @@ describe("TransformingTransport", () => {
 			// Account for segment header (8) and compression header (1)
 			const payloadSize = maxSegmentSize - 8 - 1;
 
-			const { t1, t2, local1 } = createTransformingPair({
+			const { t1, t2, local1 } = await createTransformingPair({
 				compression: "never",
 				segmentation: true,
 				maxSegmentSize,
@@ -745,7 +747,7 @@ describe("TransformingTransport", () => {
 
 	describe("multiple concurrent messages", () => {
 		it("should handle multiple concurrent large messages", async () => {
-			const { t1, t2, local1 } = createTransformingPair({
+			const { t1, t2, local1 } = await createTransformingPair({
 				compression: "never",
 				segmentation: true,
 				maxSegmentSize: 50,
@@ -789,7 +791,7 @@ describe("TransformingTransport", () => {
 
 	describe("properties", () => {
 		it("should expose connectedPeers from inner transport", async () => {
-			const { t1, t2 } = createTransformingPair();
+			const { t1, t2 } = await createTransformingPair();
 
 			assert.strictEqual(t1.connectedPeers.size, 0);
 			await t1.connect("peer-2");
@@ -800,8 +802,8 @@ describe("TransformingTransport", () => {
 			t2.dispose();
 		});
 
-		it("should expose localPeerId from inner transport", () => {
-			const { t1, t2 } = createTransformingPair();
+		it("should expose localPeerId from inner transport", async () => {
+			const { t1, t2 } = await createTransformingPair();
 
 			assert.strictEqual(t1.localPeerId, "peer-1");
 			assert.strictEqual(t2.localPeerId, "peer-2");

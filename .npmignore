@@ -1,4 +1,0 @@
-# Exclude dev files from npm package
-dist/benchmark.*
-CLAUDE.md
-examples/
